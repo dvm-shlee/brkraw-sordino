@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=67", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brkraw-sordino"
+version = "0.1.0"
+description = "BrkRaw converter hook for SORDINO-ZTE reconstruction"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+  {name = "SungHo Lee", email = "shlee@unc.edu"}
+]
+dependencies = [
+  "brkraw",
+  "numpy",
+  "scipy",
+  "mri-nufft[finufft]"
+]
+
+[project.entry-points."brkraw.converter_hook"]
+sordino = "brkraw_sordino.hook:HOOK"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["brkraw_sordino"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+brkraw_sordino = ["brkraw_hook.yaml", "docs.md", "rules/*.yaml"]

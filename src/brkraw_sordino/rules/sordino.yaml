@@ -1,0 +1,11 @@
+converter_hook:
+  - name: "sordino-zte"
+    description: "SORDINO-ZTE reconstruction hook."
+    when:
+      method:
+        sources:
+          - file: method
+            key: Method
+    if:
+      regex: ["$method", "sordino360_3_1_1_mjm"]
+    use: "sordino"
