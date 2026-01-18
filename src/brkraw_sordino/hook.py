@@ -88,8 +88,6 @@ def _progress(iterable: Any, *, desc: str = "", ncols: int = 100, disable: Optio
     return _iter()
 
 
-
-
 @dataclass
 class _Options:
     ext_factors: Tuple[float, float, float]
@@ -176,11 +174,45 @@ def _get_param(params: Any, key: str, default: Any = None) -> Any:
     return getattr(params, key, default)
 
 
+def get_gradient_axis_order(method: Any) -> list[int]:
+    axis_decoder = {"axial": "L_R", "sagittal": "A_P", "coronal": "L_R"}
+    slice_orient = _get_param(method, "PVM_SPackArrSliceOrient")
+    read_orient = _get_param(method, "PVM_SPackArrReadOrient")
+    if isinstance(slice_orient, (list, tuple, np.ndarray)):
+        slice_orient = slice_orient[0] if slice_orient else None
+    if isinstance(read_orient, (list, tuple, np.ndarray)):
+        read_orient = read_orient[0] if read_orient else None
+    if not slice_orient or not read_orient:
+        return [0, 1, 2]
+    if axis_decoder.get(str(slice_orient).lower()) != str(read_orient):
+        return [1, 0, 2]
+    return [0, 1, 2]
+
+
+def get_orient_info(visu_pars: Any) -> Optional[Dict[str, Any]]:
+    if visu_pars is None:
+        return None
+    orient_raw = _get_param(visu_pars, "VisuCoreOrientation")
+    if orient_raw is None:
+        return None
+    orient_matrix = np.squeeze(np.round(np.asarray(orient_raw))).reshape([3, 3])
+    slice_order = str(_get_param(visu_pars, "VisuCoreDiskSliceOrder", "")).lower()
+    reversed_slice = "reverse" in slice_order
+    position = np.squeeze(np.asarray(_get_param(visu_pars, "VisuCorePosition", [0, 0, 0])))
+    return dict(orient_matrix=orient_matrix, reversed_slice=reversed_slice, position=position)
+
+
 def _parse_params(scan: Any, reco_id: int, options: _Options) -> Dict[str, Any]:
     method = getattr(scan, "method", None)
     acqp = getattr(scan, "acqp", None)
     if method is None or acqp is None:
         raise ValueError("Scan is missing method/acqp parameters.")
+    reco = None
+    try:
+        reco = scan.get_reco(reco_id)
+    except Exception:
+        reco = None
+    visu_pars = getattr(reco, "visu_pars", None) or getattr(scan, "visu_pars", None)
     dtype_info = datatype_resolver.resolve(scan)
     if not dtype_info or "dtype" not in dtype_info:
         raise ValueError("Failed to resolve FID dtype from acqp.")
@@ -201,16 +233,22 @@ def _parse_params(scan: Any, reco_id: int, options: _Options) -> Dict[str, Any]:
     over_sampling = float(_get_param(method, "OverSampling"))
     dwell_time = 1.0 / (eff_bw * over_sampling) * 1e6
     acq_delay = _get_param(method, "AcqDelayTotal", 0.0)
-    traj_offset = acq_delay + dwell_time
+    traj_offset = acq_delay
     if options.traj_offset is not None:
         traj_offset = float(options.traj_offset)
 
+    orient_info = get_orient_info(visu_pars)
+    subj_type = _get_param(visu_pars, "VisuSubjectType", "Biped")
     params = dict(
+        subj_type=subj_type,
+        axis_order=get_gradient_axis_order(method),
+        orient_info=orient_info,
         fid_shape=fid_shape,
         n_frames=int(_get_param(method, "PVM_NRepetitions")),
         matrix_size=np.asarray(_get_param(method, "PVM_Matrix"), dtype=float),
         eff_bandwidth=eff_bw,
         over_sampling=over_sampling,
+        under_sampling=float(_get_param(method, "ProUnderSampling", 0.0)),
         resol=np.asarray(_get_param(method, "PVM_SpatResol"), dtype=float),
         fov=np.asarray(_get_param(method, "PVM_Fov"), dtype=float),
         half_acquisition=_as_bool(_get_param(method, "HalfAcquisition")),
@@ -321,10 +359,10 @@ def calc_radial_traj3d(
                 samp = ((i_samp + traj_offset) / (num_samples - 1)) / 2
             if not ramp_time_corr or i_pro == (n_pro + pro_offset) - 1:
                 correction = np.zeros(3)
+                traj[i_pro, i_samp, :] = samp * (g[:, i_pro] + correction)
             else:
-                i_next_pro = i_pro + 1
-                correction = (g[:, i_next_pro] - g[:, i_pro]) / num_samples * i_samp
-            traj[i_pro, i_samp, :] = samp * (g[:, i_pro] + correction)
+                correction = (g[:, i_pro] - g[:, i_pro - 1]) / num_samples * i_samp
+                traj[i_pro, i_samp, :] = samp * (g[:, i_pro - 1] + correction)
     return traj
 
 
@@ -353,8 +391,9 @@ def calc_radial_grad3d(
 
     grad_array = np.stack([grad["r"], grad["p"], grad["s"]], axis=0)
     n_pro_created = grad_array.shape[-1] * (1 if half_sphere else 2) + (1 if use_origin else 0)
-    if n_pro_created != n_pro_target:
-        raise ValueError("Target number of projections can't be reached.")
+    if not usamp:
+        if n_pro_created != n_pro_target:
+            raise ValueError("Target number of projections can't be reached.")
 
     grad_array = reorder_projections(n_theta, radial_n_phi, grad_array, reorder)
 
@@ -509,16 +548,31 @@ def correct_spoketiming(
             cur_pro = pro_loc + pro_id
             ref_timestamps = stc_params["base_timestamps"] + (cur_pro * params["repetition_time"])
 
-            for c in range(2):
-                for e in range(np.prod(params["fid_shape"][1:3])):
-                    data_feed = seg_data[c, e, pro_id, :]
-                    interp_func = interp1d(
-                        ref_timestamps,
-                        data_feed,
-                        kind="linear",
-                        fill_value=cast(Any, "extrapolate"),
-                    )
-                    corrected_seg_data[c, e, pro_id, :] = interp_func(target_timestamps)
+            for e in range(np.prod(params["fid_shape"][1:3])):
+                complex_feed = seg_data[0, e, pro_id, :] + 1j * seg_data[1, e, pro_id, :]
+                mag = np.abs(complex_feed)
+                phase = np.angle(complex_feed)
+                phase_unw = np.unwrap(phase)
+                interp_mag = interp1d(
+                    ref_timestamps,
+                    mag,
+                    kind="linear",
+                    bounds_error=False,
+                    fill_value=cast(Any, "extrapolate"),
+                )
+                interp_phase = interp1d(
+                    ref_timestamps,
+                    phase_unw,
+                    kind="linear",
+                    bounds_error=False,
+                    fill_value=cast(Any, "extrapolate"),
+                )
+                mag_t = interp_mag(target_timestamps)
+                phase_t = interp_phase(target_timestamps)
+                phase_wrap = (phase_t + np.pi) % (2 * np.pi) - np.pi
+                z_t = mag_t * np.exp(1j * phase_wrap)
+                corrected_seg_data[0, e, pro_id, :] = z_t.real
+                corrected_seg_data[1, e, pro_id, :] = z_t.imag
         for t in range(recon_n_frames(options, params)):
             frame_offset = t * params["buffer_size"]
             stc_f.seek(frame_offset + pro_offset)
@@ -551,7 +605,13 @@ def run_spoketiming_correction(
 
     with tempfile.NamedTemporaryFile(mode="w+b", delete=False, dir=tmpdir) as stc_f:
         with fid_entry.open() as fid_f:
-            num_segs = 1
+            fid_f.seek(0, os.SEEK_END)
+            file_size = fid_f.tell()
+            fid_f.seek(0)
+            if params["n_frames"] > 0:
+                file_size *= recon_n_frames(options, params) / params["n_frames"]
+            file_size_gb = file_size / (1024 ** 3)
+            num_segs = int(np.ceil(file_size_gb / options.mem_limit)) if options.mem_limit > 0 else 1
             n_pro_per_seg = int(np.ceil(n_pro / num_segs))
             if residual_pro := n_pro % n_pro_per_seg:
                 segs = [n_pro_per_seg for _ in range(num_segs - 1)] + [residual_pro]
@@ -593,7 +653,7 @@ def reconstruct_image(
         buffer_size = params["buffer_size"]
         dtype = params["dtype_code"]
 
-    traj = params["traj"][:, : -options.pass_samples, ...]
+    traj = params["traj"][:, options.pass_samples :, ...]
     logger.debug("Reconstruction traj shape: %s", traj.shape)
     recon_dtype = np.complex64
     for n in _progress(range(recon_n_frames(options, params)), desc="frames", ncols=100):
@@ -675,6 +735,36 @@ def combine_rss(imgs: np.ndarray) -> np.ndarray:
     return np.sqrt(np.sum(imgs ** 2, axis=0))
 
 
+def _transpose_spatial(data: np.ndarray, axis_order: list[int], *, has_channel: bool, has_time: bool) -> np.ndarray:
+    if axis_order == [0, 1, 2]:
+        return data
+    if has_channel:
+        axes = [0] + [a + 1 for a in axis_order]
+        if has_time:
+            axes.append(data.ndim - 1)
+    else:
+        axes = axis_order + ([data.ndim - 1] if has_time else [])
+    return np.transpose(data, axes)
+
+
+def _realign_to_2dseq(data: np.ndarray, params: Dict[str, Any], options: _Options) -> np.ndarray:
+    axis_order = params.get("axis_order")
+    orient_info = params.get("orient_info") or {}
+    if not axis_order:
+        return data
+    n_receivers = params["fid_shape"][2]
+    has_channel = n_receivers > 1
+    data = _transpose_spatial(data, list(axis_order), has_channel=has_channel, has_time=True)
+    if orient_info.get("reversed_slice"):
+        slice_axis = axis_order.index(2)
+        if has_channel:
+            slice_axis += 1
+        slicer = [slice(None)] * data.ndim
+        slicer[slice_axis] = slice(None, None, -1)
+        data = data[tuple(slicer)]
+    return data
+
+
 def _cleanup_cache(params: Dict[str, Any]) -> None:
     for fpath in params.get("cache", []):
         try:
@@ -708,6 +798,7 @@ def get_dataobj(
     params["traj"] = get_trajectory(options, params, tmpdir)
     recon_params = run_reconstruction(fid_entry, options, params, tmpdir)
     imgs = convert_to_numpy(recon_params, options, params)
+    imgs = _realign_to_2dseq(imgs, params, options)
 
     if params["fid_shape"][2] > 1 and options.rss:
         imgs = combine_rss(imgs)

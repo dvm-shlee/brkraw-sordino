@@ -1,0 +1,135 @@
+__meta__:
+  name: "sordino_metadata"
+  version: "0.1.0"
+  description: "BIDS sidecar-like metadata mapping for SORDINO data."
+  category: "metadata_spec"
+  transforms_source: "./utils.py"
+
+ResonantNucleus:
+  sources:
+    - file: acqp
+      key: NUCLEUS
+  transform:
+    - strip_bruker_string
+    - ensure_list
+
+SpectrometerFrequency:
+  sources:
+    - file: acqp
+      key: BF1
+  transform: to_float_list
+
+SpectralWidth:
+  sources:
+    - file: method
+      key: PVM_SpecSWH
+    - file: method
+      key: PVM_NavSWh
+    - file: method
+      key: PVM_EffSWh
+  transform: first_float
+
+DwellTime:
+  inputs:
+    sw_hz:
+      sources:
+        - file: method
+          key: PVM_SpecSWH
+        - file: method
+          key: PVM_NavSWh
+        - file: method
+          key: PVM_EffSWh
+      transform: first_float
+    dwell_us:
+      sources:
+        - file: method
+          key: PVM_SpecDwellTime
+      transform: first_float
+  transform: dwell_time_seconds
+
+EchoTime:
+  sources:
+    - file: method
+      key: PVM_EchoTime
+  transform: ms_to_s
+
+RepetitionTime:
+  sources:
+    - file: method
+      key: PVM_RepetitionTime
+  transform: ms_to_s
+
+SoftwareVersions:
+  sources:
+    - file: acqp
+      key: ACQ_sw_version
+  transform: strip_bruker_string
+
+SequenceName:
+  sources:
+    - file: method
+      key: Method
+    - file: method
+      key: PULPROG
+  transform: strip_bruker_string
+
+TxOffset:
+  sources:
+    - file: method
+      key: PVM_FrqWorkOffsetPpm
+  transform: first_float
+
+VoxelPosition:
+  sources:
+    - file: method
+      key: PVM_VoxArrPosition
+  transform: to_float_list
+
+VoxelSize:
+  sources:
+    - file: method
+      key: PVM_VoxArrSize
+  transform: to_float_list
+
+ConversionSoftware:
+  inputs:
+    value:
+      const: "brkraw-mrs"
+  transform: value_only
+
+ConversionSoftwareVersion:
+  inputs:
+    value:
+      const: "brkraw-mrs"
+  transform: plugin_version
+
+ConversionMethod:
+  inputs:
+    package:
+      const: "brkraw-mrs"
+    name:
+      const: "brkraw-mrs"
+  transform: conversion_method
+
+Manufacturer:
+  inputs:
+    value:
+      const: "Bruker"
+  transform: value_only
+
+kSpace:
+  inputs:
+    value:
+      const: [false, false, false]
+  transform: value_only
+
+SourceDataset:
+  inputs:
+    value:
+      const: null
+  transform: source_dataset_env
+
+ScanIdentifier:
+  inputs:
+    scan_id: "$scan_id"
+  transform: scan_id_to_string
