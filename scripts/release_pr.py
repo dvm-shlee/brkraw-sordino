@@ -214,6 +214,7 @@ def ensure_pr(
     head_ref: str,
     title: str,
     body: str,
+    can_create: bool,
     no_pr: bool,
     dry_run: bool,
 ) -> str | None:
@@ -224,6 +225,10 @@ def ensure_pr(
     pr_number = gh_pr_number(upstream_repo_full, head_ref)
     if pr_number:
         return pr_number
+
+    if not can_create:
+        logger.warning("No commits to open PR; skipping PR creation.")
+        return None
 
     gh_pr_create(upstream_repo_full, base_branch, head_ref, title, body, dry_run=dry_run)
     if dry_run:
@@ -361,21 +366,6 @@ def main() -> int:
     upstream_repo_full = f"{upstream_owner}/{upstream_repo}"
     head_ref = f"{origin_owner}:{branch}"
 
-    ensure_remote_branch(args.remote_origin, branch, dry_run=args.dry_run)
-
-    title = args.pr_title or f"Release v{args.version}"
-    initial_body = args.pr_body or build_pr_body(args.version, "- (pending)")
-
-    pr_number = ensure_pr(
-        upstream_repo_full=upstream_repo_full,
-        base_branch=base_branch,
-        head_ref=head_ref,
-        title=title,
-        body=initial_body,
-        no_pr=args.no_pr,
-        dry_run=args.dry_run,
-    )
-
     # 1) contributors
     run_update_contributors(upstream_repo_full)
     commit_if_changed(
@@ -404,7 +394,37 @@ def main() -> int:
         dry_run=args.dry_run,
     )
 
+    ensure_remote_branch(args.remote_origin, branch, dry_run=args.dry_run)
+
     # PR body update + label (if enabled)
+    if args.dry_run:
+        logger.info("[dry-run] Would push branch to %s: %s", args.remote_origin, branch)
+    else:
+        run_git(["push", args.remote_origin, f"HEAD:{branch}"], check=True)
+
+    title = args.pr_title or f"Release v{args.version}"
+    initial_body = args.pr_body or build_pr_body(args.version, "- (pending)")
+
+    ahead_count_result = run_git(["rev-list", "--count", f"{args.base}..HEAD"], check=False)
+    if ahead_count_result.returncode == 0:
+        try:
+            ahead_count = int(ahead_count_result.stdout.strip() or "0")
+        except ValueError:
+            ahead_count = 0
+    else:
+        ahead_count = 0
+
+    pr_number = ensure_pr(
+        upstream_repo_full=upstream_repo_full,
+        base_branch=base_branch,
+        head_ref=head_ref,
+        title=title,
+        body=initial_body,
+        can_create=ahead_count > 0,
+        no_pr=args.no_pr,
+        dry_run=args.dry_run,
+    )
+
     if pr_number and (not args.no_pr):
         changed_files = get_changed_files(args.base)
         files_block = "\n".join(f"- `{p}`" for p in changed_files) if changed_files else "- (none)"
@@ -413,13 +433,6 @@ def main() -> int:
 
         if (not is_prerelease(args.version)) and (not args.dry_run):
             gh_pr_add_label(upstream_repo_full, pr_number, "release", dry_run=args.dry_run)
-
-    # push (unless dry-run)
-    if args.dry_run:
-        logger.info("[dry-run] Would push branch to %s: %s", args.remote_origin, branch)
-        return 0
-
-    run_git(["push", args.remote_origin, f"HEAD:{branch}"], check=True)
     return 0
 
 
