@@ -39,7 +39,7 @@ entrypoint name (`sordino`):
 brkraw convert /path/to/study -s 3 -r 1 \
   --hook-arg sordino:ext_factors=1.2 \
   --hook-arg sordino:offset=2 \
-  --hook-arg sordino:rss=false
+  --hook-arg sordino:split_ch=false
 ```
 
 ### Pass hook options via YAML (`--hook-args-yaml`)
@@ -63,7 +63,8 @@ hooks:
   sordino:
     ext_factors: 1.2
     offset: 2
-    rss: false
+    split_ch: false
+    # as_complex: true  # optional, return (real, imag)
     # cache_dir: ~/.brkraw/cache/sordino  # optional (add manually if needed)
 ```
 
@@ -88,11 +89,14 @@ Supported keys:
 - `traj_denom`: float or null (default: None)
 - `clear_cache`: bool (default: true)
 - `operator`: string (default: "finufft")
-- `rss`: bool (default: true)
+- `split_ch`: bool (default: true, keep channels split)
+- `as_complex`: bool (default: false, return complex as (real, imag))
 - `cache_dir`: string path (default: ~/.brkraw/cache/sordino)
 
 ## Notes
 
-- The hook reconstructs data using an adjoint NUFFT and returns magnitude images.
-- Multi-channel data defaults to RSS combination.
+- The hook reconstructs data using an adjoint NUFFT and returns magnitude images by default.
+- Multi-channel data defaults to split channels; set `split_ch=false` to merge.
+- When `split_ch=false`, magnitude uses RSS while complex uses coherent sum.
+- Orientation is normalized when the first 3D axes are spatial; see `notebooks/orientation.ipynb`.
 - Cache files live under `~/.brkraw/cache/sordino` (or `BRKRAW_CONFIG_HOME`).

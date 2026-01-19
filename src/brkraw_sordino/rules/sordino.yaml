@@ -1,5 +1,5 @@
 converter_hook:
-  - name: "sordino-zte"
+  - name: "sordino-hook"
     description: "SORDINO-ZTE reconstruction hook."
     when:
       method:
@@ -7,5 +7,29 @@ converter_hook:
           - file: method
             key: Method
     if:
-      regex: ["$method", "sordino360_3_1_1_mjm"]
+      regex: ["$method", "sordino"]
     use: "sordino"
+
+info_spec:
+  - name: "sordino-info"
+    description: "SORDINO-ZTE scan info."
+    when:
+      method:
+        sources:
+          - file: method
+            key: Method
+    if:
+      regex: ["$method", "sordino"]
+    use: "sordino_info"
+
+metadata_spec:
+  - name: "sordino-metadata"
+    description: "SORDINO-ZTE metadata (draft BEP alignment)."
+    when:
+      method:
+        sources:
+          - file: method
+            key: Method
+    if:
+      regex: ["$method", "sordino"]
+    use: "sordino_metadata"

@@ -1,14 +1,12 @@
 __meta__:
   name: "sordino_info"
-  version: "0.1.0"
-  description: "Information spec for SORDINO sequence."
+  version: "0.2.0"
+  description: "Scan info spec for SORDINO, based on brkraw scan.yaml plus tuning parameters."
   category: "info_spec"
   transforms_source: "./utils.py"
 
 Method:
   sources:
-    - file: method
-      key: Method
     - file: acqp
       key: ACQ_method
   transform: strip_jcamp_string
@@ -18,6 +16,30 @@ Protocol:
     - file: acqp
       key: ACQ_protocol_name
   transform: strip_jcamp_string
+
+Dim:
+  sources:
+    - file: acqp
+      key: ACQ_dim
+
+DimDesc:
+  sources:
+    - file: acqp
+      key: ACQ_dim_desc
+  transform: convert_to_list
+
+NumEchoes:
+  sources:
+    - file: acqp
+      key: NECHOES
+
+TE (ms):
+  sources:
+    - file: method
+      key: PVM_EchoTime
+    - file: acqp
+      key: ACQ_echo_time
+  transform: convert_to_list
 
 TR (ms):
   sources:
@@ -29,51 +51,114 @@ TR (ms):
       key: ACQ_repetition_time
   transform: convert_to_list
 
-TE (ms):
+FlipAngle (degree):
+  sources:
+    - file: acqp
+      key: ACQ_flip_angle
+
+Shape:
   sources:
     - file: method
-      key: PVM_EchoTime
-    - file: acqp
-      key: ACQ_echo_time
+      key: PVM_Matrix
+  transform: convert_to_list
+
+FOV (mm):
+  sources:
+    - file: method
+      key: PVM_Fov
+  transform: convert_to_list
+
+NumSlicePack:
+  sources:
+    - file: method
+      key: PVM_NSPacks
+
+SliceOrient:
+  sources:
+    - file: method
+      key: PVM_SPackArrSliceOrient
+  transform: convert_to_list
+
+ReadOrient:
+  sources:
+    - file: method
+      key: PVM_SPackArrReadOrient
+  transform: convert_to_list
+
+SliceDistance (mm):
+  sources:
+    - file: method
+      key: PVM_SPackArrSliceDistance
+  transform: convert_to_list
+
+SliceGap (mm):
+  sources:
+    - file: method
+      key: PVM_SPackArrSliceGap
   transform: convert_to_list
 
 NumAverage:
   sources:
     - file: method
       key: PVM_NAverages
-    - file: acqp
-      key: NA
 
-Nucleus:
+NumRepeat:
   sources:
     - file: method
-      key: PVM_Nucleus1
-    - file: acqp
-      key: NUCLEUS
-  transform: strip_jcamp_string
+      key: PVM_NRepetitions
 
-CenterFrequency (MHz):
+EncNReceivers:
   sources:
     - file: method
-      key: PVM_SpecFreq
-    - file: acqp
-      key: SFO1
+      key: PVM_EncNReceivers
 
-SpectralWidth (Hz):
+NPoints:
   sources:
     - file: method
-      key: PVM_SpecSW
-    - file: acqp
-      key: SW_h
+      key: NPoints
 
-VoxelSize (mm):
+NPro:
   sources:
     - file: method
-      key: PVM_VoxArrSize
+      key: NPro
+
+EffBandwidth (Hz):
+  sources:
+    - file: method
+      key: PVM_EffSWh
+
+OverSampling:
+  sources:
+    - file: method
+      key: OverSampling
+
+AcqDelayTotal (us):
+  sources:
+    - file: method
+      key: AcqDelayTotal
+
+UnderSampling:
+  sources:
+    - file: method
+      key: ProUnderSampling
+
+SpatialResolution (mm):
+  sources:
+    - file: method
+      key: PVM_SpatResol
   transform: convert_to_list
 
-VoxelPosition (mm):
+HalfAcquisition:
   sources:
     - file: method
-      key: PVM_VoxArrPosition
-  transform: convert_to_list
+      key: HalfAcquisition
+
+UseOrigin:
+  sources:
+    - file: method
+      key: UseOrigin
+
+Reorder:
+  sources:
+    - file: method
+      key: Reorder

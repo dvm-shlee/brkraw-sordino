@@ -1,51 +1,17 @@
 __meta__:
   name: "sordino_metadata"
   version: "0.1.0"
-  description: "BIDS sidecar-like metadata mapping for SORDINO data."
+  description: "Draft metadata mapping for ZTE-based fMRI (BEP proposal alignment)."
   category: "metadata_spec"
   transforms_source: "./utils.py"
 
-ResonantNucleus:
-  sources:
-    - file: acqp
-      key: NUCLEUS
-  transform:
-    - strip_bruker_string
-    - ensure_list
-
-SpectrometerFrequency:
-  sources:
-    - file: acqp
-      key: BF1
-  transform: to_float_list
-
-SpectralWidth:
+RepetitionTime:
   sources:
     - file: method
-      key: PVM_SpecSWH
+      key: PVM_RepetitionTime
     - file: method
-      key: PVM_NavSWh
-    - file: method
-      key: PVM_EffSWh
-  transform: first_float
-
-DwellTime:
-  inputs:
-    sw_hz:
-      sources:
-        - file: method
-          key: PVM_SpecSWH
-        - file: method
-          key: PVM_NavSWh
-        - file: method
-          key: PVM_EffSWh
-      transform: first_float
-    dwell_us:
-      sources:
-        - file: method
-          key: PVM_SpecDwellTime
-      transform: first_float
-  transform: dwell_time_seconds
+      key: RepetitionTime
+  transform: ms_to_s
 
 EchoTime:
   sources:
@@ -53,63 +19,17 @@ EchoTime:
       key: PVM_EchoTime
   transform: ms_to_s
 
-RepetitionTime:
-  sources:
-    - file: method
-      key: PVM_RepetitionTime
-  transform: ms_to_s
-
-SoftwareVersions:
+FlipAngle:
   sources:
     - file: acqp
-      key: ACQ_sw_version
-  transform: strip_bruker_string
-
-SequenceName:
-  sources:
-    - file: method
-      key: Method
-    - file: method
-      key: PULPROG
-  transform: strip_bruker_string
-
-TxOffset:
-  sources:
-    - file: method
-      key: PVM_FrqWorkOffsetPpm
+      key: ACQ_flip_angle
   transform: first_float
 
-VoxelPosition:
-  sources:
-    - file: method
-      key: PVM_VoxArrPosition
-  transform: to_float_list
-
-VoxelSize:
-  sources:
-    - file: method
-      key: PVM_VoxArrSize
-  transform: to_float_list
-
-ConversionSoftware:
+MRAcquisitionType:
   inputs:
     value:
-      const: "brkraw-mrs"
+      const: "3D"
   transform: value_only
-
-ConversionSoftwareVersion:
-  inputs:
-    value:
-      const: "brkraw-mrs"
-  transform: plugin_version
-
-ConversionMethod:
-  inputs:
-    package:
-      const: "brkraw-mrs"
-    name:
-      const: "brkraw-mrs"
-  transform: conversion_method
 
 Manufacturer:
   inputs:
@@ -117,11 +37,123 @@ Manufacturer:
       const: "Bruker"
   transform: value_only
 
-kSpace:
+SequenceName:
+  sources:
+    - file: method
+      key: Method
+  transform: strip_bruker_string
+
+ZTETechnique:
+  inputs:
+    method:
+      sources:
+        - file: method
+          key: Method
+        - file: method
+          key: PULPROG
+  transform: infer_zte_technique
+
+ZTETrajectoryType:
+  sources:
+    - file: method
+      key: PVM_TrajType
+    - file: method
+      key: PVM_EncTraj
+    - file: method
+      key: TrajType
+  transform: normalize_trajectory
+
+ZTEReadoutPoints:
+  sources:
+    - file: method
+      key: NPoints
+  transform: first_int
+
+ZTEProjections:
+  sources:
+    - file: method
+      key: NPro
+  transform: first_int
+
+ZTEOverSampling:
+  sources:
+    - file: method
+      key: OverSampling
+  transform: first_float
+
+ZTEEffectiveBandwidth:
+  sources:
+    - file: method
+      key: PVM_EffSWh
+  transform: first_float
+
+ZTEAcqDelayTotal:
+  sources:
+    - file: method
+      key: AcqDelayTotal
+  transform: first_float
+
+ZTEUnderSampling:
+  sources:
+    - file: method
+      key: ProUnderSampling
+  transform: first_float
+
+ZTEReceiverChannels:
+  sources:
+    - file: method
+      key: PVM_EncNReceivers
+  transform: first_int
+
+ReconMatrix:
+  sources:
+    - file: method
+      key: PVM_Matrix
+  transform: to_int_list
+
+FieldOfView:
+  sources:
+    - file: method
+      key: PVM_Fov
+  transform: to_float_list
+
+SpatialResolution:
+  sources:
+    - file: method
+      key: PVM_SpatResol
+  transform: to_float_list
+
+SliceOrientation:
+  sources:
+    - file: method
+      key: PVM_SPackArrSliceOrient
+  transform: convert_to_list
+
+ReadoutOrientation:
+  sources:
+    - file: method
+      key: PVM_SPackArrReadOrient
+  transform: convert_to_list
+
+ConversionSoftware:
   inputs:
     value:
-      const: [false, false, false]
+      const: "brkraw-sordino"
   transform: value_only
+
+ConversionSoftwareVersion:
+  inputs:
+    value:
+      const: "brkraw-sordino"
+  transform: plugin_version
+
+ConversionMethod:
+  inputs:
+    package:
+      const: "brkraw-sordino"
+    name:
+      const: "brkraw-sordino"
+  transform: conversion_method
 
 SourceDataset:
   inputs:

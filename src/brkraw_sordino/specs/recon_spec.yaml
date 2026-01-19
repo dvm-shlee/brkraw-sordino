@@ -1,0 +1,113 @@
+__meta__:
+  name: "sordino_recon"
+  version: "0.1.0"
+  description: "Parameter mapping for SORDINO reconstruction."
+  category: "recon_spec"
+  transforms_source: "./utils.py"
+
+SliceOrientation:
+  sources:
+    - file: method
+      key: PVM_SPackArrSliceOrient
+  transform: first
+
+ReadoutOrientation:
+  sources:
+    - file: method
+      key: PVM_SPackArrReadOrient
+  transform: first
+
+GradientOrientation:
+  sources:
+    - file: method
+      key: PVM_SPackArrGradOrient
+  transform: squeeze_ndarray
+
+SubjectPosition:
+  sources:
+    - file: visu_pars
+      key: VisuSubjectPosition
+
+SubjectType:
+  sources:
+    - file: visu_pars
+      key: VisuSubjectType
+
+EncNReceivers:
+  sources:
+    - file: method
+      key: PVM_EncNReceivers
+  transform: first_int
+
+NPoints:
+  sources:
+    - file: method
+      key: NPoints
+  transform: first_int
+
+NPro:
+  sources:
+    - file: method
+      key: NPro
+  transform: first_int
+
+RepetitionTime_ms:
+  sources:
+    - file: method
+      key: RepetitionTime
+    - file: method
+      key: PVM_RepetitionTime
+  transform: first_float
+
+EffBandwidth_Hz:
+  sources:
+    - file: method
+      key: PVM_EffSWh
+  transform: first_float
+
+OverSampling:
+  sources:
+    - file: method
+      key: OverSampling
+  transform: first_float
+
+AcqDelayTotal_us:
+  sources:
+    - file: method
+      key: AcqDelayTotal
+  transform: first_float
+
+NRepetitions:
+  sources:
+    - file: method
+      key: PVM_NRepetitions
+  transform: first_int
+
+Matrix:
+  sources:
+    - file: method
+      key: PVM_Matrix
+
+UnderSampling:
+  sources:
+    - file: method
+      key: ProUnderSampling
+  transform: first_float
+
+HalfAcquisition:
+  sources:
+    - file: method
+      key: HalfAcquisition
+  transform: to_bool
+
+UseOrigin:
+  sources:
+    - file: method
+      key: UseOrigin
+  transform: to_bool
+
+Reorder:
+  sources:
+    - file: method
+      key: Reorder
+  transform: to_bool

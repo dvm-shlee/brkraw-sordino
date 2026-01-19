@@ -1,3 +1,8 @@
 docs: docs.md
+specs:
+  - specs/info_spec.yaml
+  - specs/metadata_spec.yaml
 rules:
   - rules/sordino.yaml
+transforms:
+  - specs/utils.py
