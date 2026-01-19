@@ -73,11 +73,22 @@ jobs:
         run: |
           echo "Release already exists or tag not created; skipping."
           exit 0
-      - name: Ensure tag exists
+      - name: Ensure tag provided
         run: |
           tag="${{ steps.tag.outputs.value }}"
-          if ! git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+          if [ -z "$tag" ]; then
+            echo "Tag not resolved; skipping release."
+            exit 0
+          fi
+      - name: Ensure tag exists
+        id: tag_exists
+        run: |
+          tag="${{ steps.tag.outputs.value }}"
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          else
             echo "Tag ${tag} not found; skipping release."
+            echo "value=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
       - uses: actions/checkout@v4
@@ -105,6 +116,7 @@ jobs:
           name: release-metadata
           path: release_metadata.json
       - name: Create GitHub Release
+        if: ${{ steps.tag_exists.outputs.value == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.value }}
