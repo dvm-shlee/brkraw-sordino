@@ -11,14 +11,9 @@ from typing import Iterable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-INIT_PATH = REPO_ROOT / "src" / "brkraw" / "__init__.py"
-README_PATH = REPO_ROOT / "README.md"
+INIT_PATH = REPO_ROOT / "src" / "brkraw_sordino" / "__init__.py"
 RELEASE_NOTES_PATH = REPO_ROOT / "RELEASE_NOTES.md"
-CITATION_PATH = REPO_ROOT / "CITATION.cff"
 PYPROJECT_PATH = REPO_ROOT / "pyproject.toml"
-CONTRIBUTORS_PATH = REPO_ROOT / "docs" / "dev" / "contributors.md"
-RELEASE_PREP_SCRIPT = REPO_ROOT / "scripts" / "release_prep.py"
-UPDATE_CONTRIBUTORS_SCRIPT = REPO_ROOT / "scripts" / "update_contributors.py"
 
 logger = logging.getLogger(__name__)
 
@@ -257,33 +252,28 @@ def get_changed_files(base_ref: str) -> list[str]:
     return [line.strip() for line in diff_result.stdout.splitlines() if line.strip()]
 
 
-def run_release_prep(version: str, remote: str) -> None:
-    run_cmd(
-        [
-            str(Path(__file__).resolve().parent / ".." / ".venv" / "bin" / "python"),
-            str(RELEASE_PREP_SCRIPT),
-            "--version",
-            version,
-            "--fetch-tags",
-            "--remote",
-            remote,
-        ]
+def update_version_files(version: str) -> None:
+    pyproject_text = PYPROJECT_PATH.read_text(encoding="utf-8")
+    pyproject_updated = re.sub(
+        r'(?m)^(version\s*=\s*["\'])([^"\']+)(["\'])',
+        rf"\g<1>{version}\g<3>",
+        pyproject_text,
+        count=1,
     )
+    if pyproject_text == pyproject_updated:
+        raise SystemExit("Could not update version in pyproject.toml.")
+    PYPROJECT_PATH.write_text(pyproject_updated, encoding="utf-8")
 
-
-def run_update_contributors(repo: str) -> None:
-    run_cmd(
-        [
-            str(Path(__file__).resolve().parent / ".." / ".venv" / "bin" / "python"),
-            str(UPDATE_CONTRIBUTORS_SCRIPT),
-            "--source",
-            "github",
-            "--repo",
-            repo,
-            "--output",
-            str(CONTRIBUTORS_PATH),
-        ]
+    init_text = INIT_PATH.read_text(encoding="utf-8")
+    init_updated = re.sub(
+        r'(?m)^(__version__\s*=\s*["\'])([^"\']+)(["\'])',
+        rf"\g<1>{version}\g<3>",
+        init_text,
+        count=1,
     )
+    if init_text == init_updated:
+        raise SystemExit(f"Could not update __version__ in {INIT_PATH}.")
+    INIT_PATH.write_text(init_updated, encoding="utf-8")
 
 
 def generate_release_notes(version: str, upstream_ref: str) -> None:
@@ -308,7 +298,6 @@ def build_pr_body(version: str, files_block: str) -> str:
         f"## Release v{version}\n\n"
         "### Summary\n"
         "- Bump package version and metadata\n"
-        "- Refresh contributors list\n"
         "- Generate release notes\n\n"
         "### Files updated\n"
         f"{files_block}\n\n"
@@ -366,18 +355,9 @@ def main() -> int:
     upstream_repo_full = f"{upstream_owner}/{upstream_repo}"
     head_ref = f"{origin_owner}:{branch}"
 
-    # 1) contributors
-    run_update_contributors(upstream_repo_full)
-    commit_if_changed(
-        "docs: update contributors",
-        [CONTRIBUTORS_PATH],
-        label="contributor",
-        dry_run=args.dry_run,
-    )
-
-    # 2) release prep changes
-    run_release_prep(args.version, args.remote_upstream)
-    release_prep_group = [INIT_PATH, README_PATH, PYPROJECT_PATH, CITATION_PATH]
+    # 1) release prep changes
+    update_version_files(args.version)
+    release_prep_group = [INIT_PATH, PYPROJECT_PATH]
     commit_if_changed(
         args.prep_message.format(version=args.version),
         release_prep_group,
@@ -385,7 +365,7 @@ def main() -> int:
         dry_run=args.dry_run,
     )
 
-    # 3) release notes
+    # 2) release notes
     generate_release_notes(args.version, args.base)
     commit_if_changed(
         args.notes_message.format(version=args.version),
