@@ -231,7 +231,8 @@ def ensure_pr(
 
     pr_number = gh_pr_number(upstream_repo_full, head_ref)
     if not pr_number:
-        raise SystemExit("PR created but could not retrieve PR number.")
+        logger.warning("PR created but could not retrieve PR number.")
+        return None
     return pr_number
 
 
