@@ -1,0 +1,34 @@
+{
+  "version": "2.0.0",
+  "inputs": [
+    {
+      "id": "releaseVersion",
+      "type": "promptString",
+      "description": "Release version (e.g., 0.1.0)"
+    }
+  ],
+  "tasks": [
+    {
+      "label": "Standard: Setup venv + deps",
+      "type": "shell",
+      "command": "python3 -m venv .venv && . .venv/bin/activate && python -m pip install -U pip && python -m pip install -e .[dev]",
+      "windows": {
+        "command": "py -m venv .venv; .venv\\Scripts\\Activate.ps1; python -m pip install -U pip; python -m pip install -e .[dev]",
+        "options": {
+          "shell": {
+            "executable": "pwsh"
+          }
+        }
+      },
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Standard: Release Prep PR (2-step)",
+      "type": "shell",
+      "command": "\"${command:python.interpreterPath}\" scripts/release_pr.py --version ${input:releaseVersion} --base upstream/main --remote-upstream upstream --remote-origin origin",
+      "group": "build",
+      "problemMatcher": []
+    }
+  ]
+}
