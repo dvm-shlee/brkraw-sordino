@@ -14,14 +14,43 @@ on:
 permissions:
   contents: write
   discussions: write
+  actions: read
 
 jobs:
   release:
     if: ${{ github.repository == 'BrkRaw/brkraw-sordino' && (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') }}
     runs-on: ubuntu-latest
     steps:
-      - name: Download release metadata
+      - name: Check release metadata artifact
         if: ${{ github.event_name == 'workflow_run' }}
+        id: artifact
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from urllib import request
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          run_id = os.environ["RUN_ID"]
+          token = os.environ.get("GITHUB_TOKEN")
+          url = f"https://api.github.com/repos/{repo}/actions/runs/{run_id}/artifacts"
+
+          req = request.Request(url)
+          req.add_header("Authorization", f"Bearer {token}")
+          req.add_header("Accept", "application/vnd.github+json")
+          with request.urlopen(req) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+
+          found = any(a.get("name") == "release-metadata" for a in payload.get("artifacts", []))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+            handle.write(f"found={'true' if found else 'false'}\n")
+          PY
+      - name: Download release metadata
+        if: ${{ github.event_name == 'workflow_run' && steps.artifact.outputs.found == 'true' }}
         uses: actions/download-artifact@v4
         continue-on-error: true
         with:
