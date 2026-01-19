@@ -77,26 +77,23 @@ Notes:
 Supported keys:
 
 - `ext_factors`: scalar or 3-item sequence (default: 1.0)
-- `pass_samples`: int (default: 1)
+- `ignore_samples`: int (default: 1)
 - `offset`: int (default: 0)
 - `num_frames`: int or null (default: None)
-- `traj_offset`: float or null (default: None)
-- `spoketiming`: bool (default: false)
-- `ramp_time`: bool (default: false)
+- `correct_spoketiming`: bool (default: false)
+- `correct_ramptime`: bool (default: true)
 - `offreso_ch`: int or null (default: None)
 - `offreso_freq`: float (default: 0.0)
 - `mem_limit`: float (default: 0.5)
-- `traj_denom`: float or null (default: None)
 - `clear_cache`: bool (default: true)
-- `operator`: string (default: "finufft")
-- `split_ch`: bool (default: true, keep channels split)
+- `split_ch`: bool (default: false, merge channels)
 - `as_complex`: bool (default: false, return complex as (real, imag))
 - `cache_dir`: string path (default: ~/.brkraw/cache/sordino)
 
 ## Notes
 
 - The hook reconstructs data using an adjoint NUFFT and returns magnitude images by default.
-- Multi-channel data defaults to split channels; set `split_ch=false` to merge.
+- Multi-channel data defaults to merged channels; set `split_ch=true` to keep channels split.
 - When `split_ch=false`, magnitude uses RSS while complex uses coherent sum.
 - Orientation is normalized when the first 3D axes are spatial; see `notebooks/orientation.ipynb`.
 - Cache files live under `~/.brkraw/cache/sordino` (or `BRKRAW_CONFIG_HOME`).
