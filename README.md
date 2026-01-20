@@ -93,7 +93,9 @@ Supported keys:
 ## Notes
 
 - The hook reconstructs data using an adjoint NUFFT and returns magnitude images by default.
+- Converted NIfTI outputs apply slope/intercept scaling for uint16 storage.
+- `ext_factors` scales the affine around the FOV center during conversion.
 - Multi-channel data defaults to merged channels; set `split_ch=true` to keep channels split.
 - When `split_ch=false`, magnitude uses RSS while complex uses coherent sum.
 - Orientation is normalized when the first 3D axes are spatial; see `notebooks/orientation.ipynb`.
-- Cache files live under `~/.brkraw/cache/sordino` (or `BRKRAW_CONFIG_HOME`).
+- Cache files live under `~/.brkraw/cache/sordino` (or `BRKRAW_CONFIG_HOME`) and are cleared when `clear_cache=true`.

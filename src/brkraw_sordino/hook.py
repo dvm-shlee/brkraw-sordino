@@ -6,6 +6,8 @@ from pathlib import Path
 
 from typing import Any, Optional, Tuple, Dict, Union, cast, TYPE_CHECKING
 
+from nibabel.nifti1 import Nifti1Image
+
 from brkraw.specs.remapper import load_spec, map_parameters
 from brkraw.resolver import fid as fid_resolver
 from brkraw.resolver import datatype as dtype_resolver
@@ -96,6 +98,9 @@ def get_dataobj(
     ) -> Optional[Union[np.ndarray, Tuple[np.ndarray, ...]]]:
     
     options = _build_options(kwargs)
+    setattr(scan, "_sordino_options", options)
+    cache_files: list[str] = []
+    setattr(scan, "_sordino_cache_files", cache_files)
     recon_info = _parse_recon_info(scan)
     fid_entry = _get_fid_entry(scan)
 
@@ -105,11 +110,13 @@ def get_dataobj(
         with tempfile.NamedTemporaryFile(   
             mode="w+b", delete=False, dir=options.cache_dir
         ) as img_fobj:  # where reconstructed dataobj will be stored.
+            cache_files.append(img_fobj.name)
             
             if options.correct_spoketiming:
                 with tempfile.NamedTemporaryFile(
                     mode="w+b", delete=False, dir=options.cache_dir
                 ) as stc_fobj:  # where spoketiming corrected fid will be stored.
+                    cache_files.append(stc_fobj.name)
                     
                     segs = prep_fid_segmentation(fid_fobj, recon_info, options)
                     logger.info("Spoketiming correction: %s segment(s).", segs.shape[0])
@@ -159,6 +166,90 @@ def get_dataobj(
         )
     return correct_orientation(cast(np.ndarray, dataobj), recon_info)
 
-HOOK = {"get_dataobj": get_dataobj}
+def _calc_slope_inter(data: np.ndarray) -> Tuple[np.ndarray, float, float]:
+    inter = float(np.min(data))
+    dmax = float(np.max(data))
+    slope = (dmax - inter) / 2**16 if dmax != inter else 1.0
+    if data.ndim > 3:
+        converted = np.stack(
+            [((data[..., idx] - inter) / slope).round().astype(np.uint16) for idx in range(data.shape[-1])],
+            axis=-1,
+        )
+    else:
+        converted = ((data - inter) / slope).round().astype(np.uint16)
+    return converted.squeeze(), slope, inter
 
-__all__ = ["HOOK", "get_dataobj"]
+
+def _apply_ext_factor_affine(affine: np.ndarray, shape: Tuple[int, int, int], ext_factors: Tuple[float, float, float]) -> np.ndarray:
+    factors = np.asarray(ext_factors, dtype=float)
+    if np.allclose(factors, 1.0):
+        return affine
+    scaled_matrix = np.asarray(shape, dtype=float)
+    base_matrix = scaled_matrix / factors
+    center = (base_matrix - 1.0) / 2.0
+    origin = center - (scaled_matrix - 1.0) / 2.0
+    updated = affine.copy()
+    updated[:, 3] = updated.dot(origin.tolist() + [1.0])
+    return updated
+
+
+def _clear_cache_files(scan: Any, *, keep: Optional[Tuple[str, ...]] = None) -> None:
+    cache_files = getattr(scan, "_sordino_cache_files", None)
+    if not cache_files:
+        return
+    keep = keep or tuple()
+    for path in list(cache_files):
+        if any(str(path).endswith(suffix) for suffix in keep):
+            continue
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    cache_files.clear()
+
+
+def convert(
+    scan: Any,
+    dataobj: Union[np.ndarray, Tuple[np.ndarray, ...]],
+    affine: Union[np.ndarray, Tuple[np.ndarray, ...]],
+    *,
+    xyz_units: str = "mm",
+    t_units: str = "sec",
+    override_header: Optional[Dict[str, Any]] = None,
+    **kwargs: Any,
+):
+    options = getattr(scan, "_sordino_options", None) or _build_options(kwargs)
+    ext_factors = options.ext_factors
+    data_list = list(dataobj) if isinstance(dataobj, tuple) else [dataobj]
+    affine_list = list(affine) if isinstance(affine, tuple) else [affine]
+    nii_list = []
+    for idx, data in enumerate(data_list):
+        aff = affine_list[idx] if idx < len(affine_list) else affine_list[0]
+        scaled_affine = _apply_ext_factor_affine(aff, tuple(data.shape[:3]), ext_factors)
+        img_u16, slope, inter = _calc_slope_inter(np.asarray(data))
+        nii = Nifti1Image(img_u16, scaled_affine)
+        nii.set_qform(scaled_affine, 1)
+        nii.set_sform(scaled_affine, 0)
+        nii.header.set_slope_inter(slope, inter)
+        try:
+            nii.header.set_xyzt_units(xyz_units, t_units)
+        except Exception:
+            pass
+        if override_header:
+            for key, value in override_header.items():
+                if value is not None:
+                    try:
+                        nii.header[key] = value
+                    except Exception:
+                        pass
+        nii_list.append(nii)
+    if options.clear_cache:
+        _clear_cache_files(scan)
+    if isinstance(dataobj, tuple) or isinstance(affine, tuple):
+        return tuple(nii_list)
+    return nii_list[0] if nii_list else None
+
+
+HOOK = {"get_dataobj": get_dataobj, "convert": convert}
+
+__all__ = ["HOOK", "get_dataobj", "convert"]
