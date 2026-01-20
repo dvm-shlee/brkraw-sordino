@@ -1,8 +1,11 @@
-# Release v0.1.1
+# Release v0.1.2
 
 Date: 2026-01-19
 Changes
 
+- chore: prepare release v0.1.2 (02d1f36)
+- chore: soften PR number lookup failure (1a1d4d3)
+- docs: release notes for v0.1.1 (d9d5473)
 - chore: prepare release v0.1.1 (06a8195)
 - docs: update supported hook keys (cebe1fe)
 - chore: adapt release PR script (115c7f2)
