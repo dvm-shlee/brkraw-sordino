@@ -1,8 +1,11 @@
-# Release v0.1.2
+# Release v0.1.3
 
 Date: 2026-01-19
 Changes
 
+- chore: prepare release v0.1.3 (c5bd8b4)
+- ci: publish on release (f2e057c)
+- docs: release notes for v0.1.2 (5815073)
 - chore: prepare release v0.1.2 (02d1f36)
 - chore: soften PR number lookup failure (1a1d4d3)
 - docs: release notes for v0.1.1 (d9d5473)
