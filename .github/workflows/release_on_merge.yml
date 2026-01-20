@@ -130,6 +130,12 @@ jobs:
           tag="${{ steps.version.outputs.value }}"
           git tag "$tag" "${{ github.sha }}"
           git push origin "$tag"
+      - name: Create GitHub release
+        if: ${{ steps.release.outputs.allowed == 'true' && steps.tag.outputs.exists == 'false' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.value }}
+          generate_release_notes: true
       - name: Write release metadata
         run: |
           tag="${{ steps.version.outputs.value }}"
