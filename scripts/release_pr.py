@@ -6,6 +6,7 @@ import datetime as dt
 import logging
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Iterable
 
@@ -148,7 +149,7 @@ def gh_pr_number(upstream_repo: str, head_ref: str) -> str | None:
 
 def gh_pr_create(
     upstream_repo: str, base_branch: str, head_ref: str, title: str, body: str, *, dry_run: bool
-) -> None:
+) -> str | None:
     if dry_run:
         logger.info(
             "[dry-run] Would create PR in %s: base=%s, head=%s",
@@ -157,8 +158,8 @@ def gh_pr_create(
             head_ref,
         )
         logger.info("[dry-run] Title: %s", title)
-        return
-    run_cmd(
+        return None
+    result = run_cmd(
         [
             "gh",
             "pr",
@@ -175,6 +176,14 @@ def gh_pr_create(
             body,
         ]
     )
+    output = result.stdout.strip()
+    match = re.search(r"/pull/(\d+)", output)
+    if match:
+        return match.group(1)
+    match = re.search(r"#(\d+)", output)
+    if match:
+        return match.group(1)
+    return None
 
 
 def gh_pr_edit(upstream_repo: str, pr_number: str, body: str, *, dry_run: bool) -> None:
@@ -225,9 +234,25 @@ def ensure_pr(
         logger.warning("No commits to open PR; skipping PR creation.")
         return None
 
-    gh_pr_create(upstream_repo_full, base_branch, head_ref, title, body, dry_run=dry_run)
+    created_pr = gh_pr_create(
+        upstream_repo_full,
+        base_branch,
+        head_ref,
+        title,
+        body,
+        dry_run=dry_run,
+    )
     if dry_run:
         return "DRY_RUN_PR"
+
+    if created_pr:
+        return created_pr
+
+    for _ in range(3):
+        time.sleep(2)
+        pr_number = gh_pr_number(upstream_repo_full, head_ref)
+        if pr_number:
+            return pr_number
 
     pr_number = gh_pr_number(upstream_repo_full, head_ref)
     if not pr_number:
