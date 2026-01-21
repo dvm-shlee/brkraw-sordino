@@ -54,6 +54,25 @@ def _get_cache_dir(path: Optional[Union[str, Path]]) -> Path:
 
 
 def _build_options(kwargs: Dict[str, Any]) -> Options:
+    logger.debug("Sordino hook kwargs: %s", kwargs)
+    known_keys = {
+        "cache_dir",
+        "ext_factors",
+        "ignore_samples",
+        "offset",
+        "num_frames",
+        "correct_spoketiming",
+        "correct_ramptime",
+        "offreso_ch",
+        "offreso_freq",
+        "mem_limit",
+        "clear_cache",
+        "split_ch",
+        "as_complex",
+    }
+    unknown_keys = sorted(set(kwargs.keys()) - known_keys)
+    if unknown_keys:
+        logger.debug("Sordino hook unknown kwargs: %s", unknown_keys)
     cache_dir = _get_cache_dir(kwargs.get("cache_dir"))
     logger.debug("Cache dir: %s", cache_dir)
 
@@ -98,6 +117,7 @@ def get_dataobj(
     ) -> Optional[Union[np.ndarray, Tuple[np.ndarray, ...]]]:
     
     options = _build_options(kwargs)
+    logger.debug("Sordino options correct_spoketiming=%s", options.correct_spoketiming)
     setattr(scan, "_sordino_options", options)
     cache_files: list[str] = []
     setattr(scan, "_sordino_cache_files", cache_files)
@@ -111,12 +131,15 @@ def get_dataobj(
             mode="w+b", delete=False, dir=options.cache_dir
         ) as img_fobj:  # where reconstructed dataobj will be stored.
             cache_files.append(img_fobj.name)
+            logger.debug("Created temp image file: %s", img_fobj.name)
             
             if options.correct_spoketiming:
+                logger.debug("Spoketiming correction enabled.")
                 with tempfile.NamedTemporaryFile(
                     mode="w+b", delete=False, dir=options.cache_dir
                 ) as stc_fobj:  # where spoketiming corrected fid will be stored.
                     cache_files.append(stc_fobj.name)
+                    logger.debug("Created temp spoketiming file: %s", stc_fobj.name)
                     
                     segs = prep_fid_segmentation(fid_fobj, recon_info, options)
                     logger.info("Spoketiming correction: %s segment(s).", segs.shape[0])
@@ -126,6 +149,7 @@ def get_dataobj(
                                           override_buffer_size=stc_param['buffer_size'],
                                           override_dtype=stc_param['dtype'])
             else:
+                logger.debug("Spoketiming correction disabled.")
                 dtype = recon_dataobj(fid_fobj, traj, recon_info, img_fobj, options)
     
     with open(img_fobj.name, "rb") as img_fobj:
@@ -133,19 +157,31 @@ def get_dataobj(
         dataobj = np.frombuffer(img_fobj.read(), dtype=dtype).reshape(dataobj_shape, order='F')
     num_receivers = recon_info.get("EncNReceivers", 1)
     if not options.as_complex:
+        logger.debug("Converting to magnitude (as_complex=False).")
         dataobj = np.abs(dataobj)
+    else:
+        logger.debug("Keeping complex data (as_complex=True).")
 
     is_multi = num_receivers > 1
     if not options.split_ch and is_multi:
+        logger.debug("Combining multi-channel data (split_ch=False).")
         if options.as_complex:
+            logger.debug("Combining complex channels by summation.")
             dataobj = np.sum(dataobj, axis=0)
             is_multi = False
         else:
+            logger.debug("Combining magnitude channels by RSS.")
             dataobj = np.sqrt(np.sum(dataobj ** 2, axis=0))
             is_multi = False
+    elif options.split_ch and is_multi:
+        logger.debug("Keeping multi-channel data (split_ch=True).")
+    else:
+        logger.debug("Single-channel data detected.")
 
     if options.as_complex:
+        logger.debug("Formatting complex output.")
         if is_multi:
+            logger.debug("Emitting complex output per channel.")
             dataobj_list = []
             for receiver_data in dataobj:
                 receiver_arr = cast(NDArray[Any], receiver_data)
@@ -154,16 +190,19 @@ def get_dataobj(
                     correct_orientation(np.imag(receiver_arr), recon_info),
                 ])
             return cast(Tuple[np.ndarray, ...], tuple(dataobj_list))
+        logger.debug("Emitting complex output (real/imag pair).")
         return (
             correct_orientation(np.real(dataobj), recon_info),
             correct_orientation(np.imag(dataobj), recon_info),
         )
 
     if is_multi:
+        logger.debug("Emitting magnitude output per channel.")
         return cast(
             Tuple[np.ndarray, ...],
             tuple(correct_orientation(ch, recon_info) for ch in dataobj),
         )
+    logger.debug("Emitting single-channel magnitude output.")
     return correct_orientation(cast(np.ndarray, dataobj), recon_info)
 
 def _calc_slope_inter(data: np.ndarray) -> Tuple[np.ndarray, float, float]:
@@ -206,6 +245,7 @@ def _clear_cache_files(scan: Any, *, keep: Optional[Tuple[str, ...]] = None) -> 
         except OSError:
             pass
     cache_files.clear()
+    logger.debug("Cleared sordino cache files.")
 
 
 def convert(

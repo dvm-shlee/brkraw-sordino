@@ -10,7 +10,7 @@ logger = logging.getLogger("brkraw.sordino")
 def progressbar(iterable: Any, *, desc: str = "", ncols: int = 100, disable: Optional[bool] = None):
     """Lightweight progress iterator (tqdm-like) without external deps."""
     if disable is None:
-        disable = logger.isEnabledFor(logging.DEBUG)
+        disable = str(os.environ.get("BRKRAW_NO_PROGRESS", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
     stream: TextIO = cast(
         TextIO,
         sys.__stderr__

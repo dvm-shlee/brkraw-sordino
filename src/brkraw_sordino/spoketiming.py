@@ -1,13 +1,44 @@
+import gc
 import os
 import logging
+import resource
+import platform
 from .helper import progressbar
 import numpy as np
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from scipy.interpolate import interp1d
 from .recon import get_num_frames, parse_fid_info
 from .typing import Options
 
 logger = logging.getLogger("brkraw.sordino")
+_MEMORY_SAFETY_FACTOR = 3.4
+
+def _get_current_rss_gb() -> Optional[float]:
+    if platform.system() != "Linux":
+        return None
+    try:
+        with open("/proc/self/statm", "r", encoding="utf-8") as handle:
+            parts = handle.read().strip().split()
+        if len(parts) < 2:
+            return None
+        rss_pages = int(parts[1])
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        return (rss_pages * page_size) / (1024 ** 3)
+    except Exception:
+        return None
+
+
+def _log_rss(note: str) -> None:
+    try:
+        rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    except Exception:
+        return
+    rss_max_gb = rss_kb / (1024 * 1024)
+    rss_cur_gb = _get_current_rss_gb()
+    if rss_cur_gb is None:
+        logger.debug("RSS max %.2f GB (%s)", rss_max_gb, note)
+    else:
+        logger.debug("RSS max %.2f GB, current %.2f GB (%s)", rss_max_gb, rss_cur_gb, note)
 
 
 
@@ -26,10 +57,19 @@ def get_fid_filesize_in_gb(fid_fobj,
 
 def get_num_segment(file_size_gb, recon_info: Dict[str, Any], options: Options):
     npro = recon_info['NPro']
-    num_segs = int(np.ceil(file_size_gb / options.mem_limit)) if options.mem_limit > 0 else 1
-    npro_per_seg = int(npro / num_segs)
-
-    if residual_pro := npro % npro_per_seg:
+    if options.mem_limit > 0:
+        effective_limit = options.mem_limit / _MEMORY_SAFETY_FACTOR
+        num_segs = int(np.ceil(file_size_gb / effective_limit))
+        logger.debug(
+            "Adjusted mem_limit %.3f GB -> %.3f GB (safety factor 3.4).",
+            options.mem_limit,
+            effective_limit,
+        )
+    else:
+        num_segs = 1
+    npro_per_seg = int(np.ceil(npro / num_segs))
+    residual_pro = npro - (npro_per_seg * (num_segs - 1))
+    if residual_pro > 0:
         segs = [npro_per_seg for _ in range(num_segs - 1)] + [residual_pro]
     else:
         segs = [npro_per_seg for _ in range(num_segs)]
@@ -119,6 +159,7 @@ def correct_spoketiming(segs, fid_f, stc_f, recon_info, options):
     (Same concept as slice timing correction, but applied to FID signal)
     """
     logger.debug("+ Spoketiming correction")
+    _log_rss("start")
     fid_shape, fid_dtype = parse_fid_info(recon_info)
     buff_size = int(np.prod(fid_shape) * fid_dtype.itemsize)
     num_frames = get_num_frames(recon_info, options)
@@ -135,6 +176,7 @@ def correct_spoketiming(segs, fid_f, stc_f, recon_info, options):
         segmented = get_segmented_data(
             fid_f, fid_shape, fid_dtype, buff_size, num_frames, seg_size, pro_loc, options
             )
+        _log_rss(f"segment {pro_loc}-{pro_loc + seg_size - 1} loaded")
         
         seg_data = segmented['data']
         corrected_seg_data = np.empty_like(seg_data)
@@ -158,6 +200,7 @@ def correct_spoketiming(segs, fid_f, stc_f, recon_info, options):
             frame_offset = t * buff_size
             stc_f.seek(frame_offset + segmented['offset'])
             stc_f.write(corrected_seg_data[:,:,:, t].flatten(order='F').tobytes())
+        _log_rss(f"segment {pro_loc}-{pro_loc + seg_size - 1} written")
 
         if results['dtype'] == None:
             results['dtype'] = corrected_seg_data.dtype
@@ -165,6 +208,9 @@ def correct_spoketiming(segs, fid_f, stc_f, recon_info, options):
             assert results['dtype'] == corrected_seg_data.dtype
         
         pro_loc += seg_size
+        del segmented, seg_data, corrected_seg_data
+        gc.collect()
+        _log_rss(f"segment {pro_loc} gc")
 
     results['buffer_size'] = np.prod([fid_shape]) * results['dtype'].itemsize
     return results
