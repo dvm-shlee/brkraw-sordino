@@ -1,8 +1,14 @@
-# Release v0.1.3
+# Release v0.2.0
 
-Date: 2026-01-19
+Date: 2026-01-21
 Changes
 
+- chore: prepare release v0.2.0 (be4facf)
+- Improve sordino logging and segmentation safety (99928e6)
+- feat: restore sordino convert post-processing (eca7ff6)
+- Sanitize spoketiming interpolation output (92985d7)
+- chore: retry PR number lookup (992fe6d)
+- docs: release notes for v0.1.3 (6284b41)
 - chore: prepare release v0.1.3 (c5bd8b4)
 - ci: publish on release (f2e057c)
 - docs: release notes for v0.1.2 (5815073)
