@@ -133,7 +133,7 @@ def get_dataobj(
             cache_files.append(img_fobj.name)
             logger.debug("Created temp image file: %s", img_fobj.name)
             
-            if options.correct_spoketiming:
+            if options.correct_spoketiming and recon_info['NRepetitions'] > 1:
                 logger.debug("Spoketiming correction enabled.")
                 with tempfile.NamedTemporaryFile(
                     mode="w+b", delete=False, dir=options.cache_dir
