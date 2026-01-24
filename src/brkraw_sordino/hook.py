@@ -267,6 +267,7 @@ def convert(
         aff = affine_list[idx] if idx < len(affine_list) else affine_list[0]
         scaled_affine = _apply_ext_factor_affine(aff, tuple(data.shape[:3]), ext_factors)
         img_u16, slope, inter = _calc_slope_inter(np.asarray(data))
+        logger.debug('Calculated slope: %s, inter: %s', slope, inter)
         nii = Nifti1Image(img_u16, scaled_affine)
         nii.set_qform(scaled_affine, 1)
         nii.set_sform(scaled_affine, 0)
