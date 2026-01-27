@@ -1,7 +1,10 @@
 import gc
 import os
 import logging
-import resource
+try:
+    import resource
+except Exception:
+    resource = None
 import platform
 from .helper import progressbar
 import numpy as np
@@ -28,12 +31,25 @@ def _get_current_rss_gb() -> Optional[float]:
         return None
 
 
-def _log_rss(note: str) -> None:
+def _get_max_rss_gb() -> Optional[float]:
+    if resource is None:
+        return None
     try:
-        rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     except Exception:
+        return None
+    sys_name = platform.system()
+    if sys_name == "Darwin":
+        # macOS reports ru_maxrss in bytes.
+        return rss / (1024 ** 3)
+    # Linux reports ru_maxrss in kilobytes.
+    return (rss * 1024) / (1024 ** 3)
+
+
+def _log_rss(note: str) -> None:
+    rss_max_gb = _get_max_rss_gb()
+    if rss_max_gb is None:
         return
-    rss_max_gb = rss_kb / (1024 * 1024)
     rss_cur_gb = _get_current_rss_gb()
     if rss_cur_gb is None:
         logger.debug("RSS max %.2f GB (%s)", rss_max_gb, note)
