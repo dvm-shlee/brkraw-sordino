@@ -4,7 +4,7 @@ import numpy as np
 import tempfile
 from pathlib import Path
 
-from typing import Any, Optional, Tuple, Dict, Union, cast, TYPE_CHECKING
+from typing import Any, Optional, Tuple, Dict, Union, cast
 
 from nibabel.nifti1 import Nifti1Image
 
@@ -18,7 +18,6 @@ from brkraw.core.zip import ZippedFile
 from numpy.typing import NDArray
 from .typing import Options
 from .traj import get_trajectory
-from .helper import progressbar
 from .recon import get_dataobj_shape, recon_dataobj
 from .spoketiming import prep_fid_segmentation, correct_spoketiming
 from .orientation import correct as correct_orientation

@@ -119,19 +119,26 @@ def get_segmented_data(fid_f, fid_shape, fid_dtype,
 
 
 def interpolate_spoketiming(complex_feed, sample_id, pro_id, ref_timestamps, timestamps, corrected_data):
-    """ interpolation step
-    each projection interpolated the timing at the middle of projection
-    number of spokes * receivers processed together
-    therefore, the spoke timing within a projection will not be corrected
-    instead this actually corrected the spoke timing for each projection
-    as single TR represent time of one projection
-    
-    :param complex_feed: Description
-    :param sample_id: Description
-    :param pro_id: Description
-    :param ref_timestamps: Description
-    :param timestamps: Description
-    :param corrected_data: Description
+    """Interpolate a projection's spoke timing to the mid-projection time.
+
+    Each projection is interpolated at the middle of the projection time. Spokes
+    within a projection are not individually corrected; instead, each projection
+    is corrected as a unit because a single TR represents one projection.
+
+    Args:
+        complex_feed (np.ndarray): Complex-valued samples for a single projection
+            across time, shaped like (num_frames,).
+        sample_id (int): Sample index within the projection.
+        pro_id (int): Projection index within the current segment.
+        ref_timestamps (np.ndarray): Reference timestamps for the current
+            projection, shaped like (num_frames,).
+        timestamps (Dict[str, np.ndarray]): Timestamp dict with "base" and
+            "target" arrays.
+        corrected_data (np.ndarray): Output buffer to write corrected data into,
+            shaped like (2, num_samples, seg_size, num_frames).
+
+    Returns:
+        np.ndarray: The updated corrected_data buffer.
     """
     mag = np.abs(complex_feed)
     phase = np.angle(complex_feed)
@@ -155,10 +162,21 @@ def interpolate_spoketiming(complex_feed, sample_id, pro_id, ref_timestamps, tim
 
 
 def correct_spoketiming(segs, fid_f, stc_f, recon_info, options):
-    """ Correct timing of each spoke to align center of scan time
-    (Same concept as slice timing correction, but applied to FID signal)
+    """Correct spoke timing to align to the center of scan time.
+
+    This applies the same concept as slice timing correction, but to FID signals.
+
+    Args:
+        segs (np.ndarray): Segment sizes (number of projections per segment).
+        fid_f (IO[bytes]): Input FID file handle.
+        stc_f (IO[bytes]): Output file handle for spoke-timing-corrected data.
+        recon_info (Dict[str, Any]): Reconstruction metadata.
+        options (Options): Reconstruction options.
+
+    Returns:
+        Dict[str, Any]: Result metadata including buffer size and dtype.
     """
-    logger.debug("+ Spoketiming correction")
+    logger.debug("Processing spoke-timing correction")
     _log_rss("start")
     fid_shape, fid_dtype = parse_fid_info(recon_info)
     buff_size = int(np.prod(fid_shape) * fid_dtype.itemsize)
@@ -190,7 +208,7 @@ def correct_spoketiming(segs, fid_f, stc_f, recon_info, options):
                                                                  ref_timestamps, timestamps, 
                                                                  corrected_seg_data)
                 except Exception as e:
-                    logger.debug("+ Exception occured during spoketiming correction")
+                    logger.debug("!!! Exception !!!")
                     logger.debug(f" - RefTimeStamps: {ref_timestamps}")
                     logger.debug(f" - DataFeed: {complex_feed}")
                     raise e
