@@ -1,8 +1,20 @@
-# Release v0.2.0
+# Release v0.2.1
 
-Date: 2026-01-21
+Date: 2026-01-27
 Changes
 
+- chore: prepare release v0.2.1 (0683f8c)
+- update to make publish.yaml publish to pypi not release.yaml (f5d5514)
+- update release workflow (1ff955e)
+- Sync release workflows with viewer (80dfd9c)
+- Add deterministic cache paths for recon and spoketiming (d947620)
+- Apply ext_factors in get_affine and add hook (889486f)
+- Make RSS logging Windows-safe by making resource optional (674c155)
+- chore: improve docstrings and logging (0eb39e1)
+- logging for slope and inter values (1427cf3)
+- spoketiming correction should only works for 4d dataset (fa36440)
+- fix: use gh api for PR operations (9ec5cb3)
+- docs: release notes for v0.2.0 (7970fcb)
 - chore: prepare release v0.2.0 (be4facf)
 - Improve sordino logging and segmentation safety (99928e6)
 - feat: restore sordino convert post-processing (eca7ff6)
