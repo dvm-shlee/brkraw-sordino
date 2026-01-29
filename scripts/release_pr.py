@@ -437,7 +437,6 @@ def main() -> int:
         head_ref=head_ref,
         title=title,
         body=initial_body,
-        can_create=ahead_count > 0,
         no_pr=args.no_pr,
         dry_run=args.dry_run,
     )
