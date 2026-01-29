@@ -153,8 +153,21 @@ def _load_cache_meta(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def _write_cache_meta(path: Path, meta: Dict[str, Any]) -> None:
+    def _json_safe(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(k): _json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [_json_safe(item) for item in value]
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, (np.integer, np.floating, np.bool_)):
+            return value.item()
+        return value
+
     with open(path, "w", encoding="utf-8") as handle:
-        json.dump(meta, handle, sort_keys=True)
+        json.dump(_json_safe(meta), handle, sort_keys=True)
 
 
 def _is_cache_valid(path: Path, *, expected_size: Optional[int] = None) -> bool:
