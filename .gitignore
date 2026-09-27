@@ -10,3 +10,12 @@ build/
 .DS_Store
 .tmp
 .venv
+.omx/
+
+# Local AI agent guidance (not version controlled)
+AGENTS.md
+CLAUDE.md
+
+# Local work files (not version controlled)
+notebooks/orientation copy.ipynb
+outputs/
