@@ -393,7 +393,8 @@ def get_affine(
 def _calc_slope_inter(data: np.ndarray) -> Tuple[np.ndarray, float, float]:
     inter = float(np.min(data))
     dmax = float(np.max(data))
-    slope = (dmax - inter) / 2**16 if dmax != inter else 1.0
+    # 65535 steps: the maximum maps to 65535 (2**16 would wrap to 0 in uint16)
+    slope = (dmax - inter) / (2**16 - 1) if dmax != inter else 1.0
     if data.ndim > 3:
         converted = np.stack(
             [((data[..., idx] - inter) / slope).round().astype(np.uint16) for idx in range(data.shape[-1])],
