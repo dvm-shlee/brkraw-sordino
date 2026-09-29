@@ -241,6 +241,31 @@ def dead_time_kgrid(t: SeqTiming, over_sampling: float) -> float:
     return t.acq_delay_total_us / t.dwell_us / float(over_sampling)
 
 
+def kspace_gap(t: SeqTiming, over_sampling: float, ignore_samples: int = 1) -> Dict[str, Any]:
+    """[read] The unsampled k-space centre of a scan, for logs and the result
+    metadata (BRK-0060). Nothing here fills the centre (BRK-0059).
+
+    gap_kgrid:       radius of the first acquired sample (sample 0), i.e. the
+                     dead time, in k-grid units (1/FOV); ``dead_time_kgrid``.
+    gap_used_kgrid:  radius of the first sample the reconstruction keeps
+                     (sample ``ignore_samples``); the adjoint leaves this
+                     radius empty.
+    Radii are along the spoke: exact for a constant gradient (zte); for the
+    ramped SORDINO trajectory the vector step moves a sample by a few
+    hundredths of a k-grid unit (WI-0056 run 5), which this ignores.
+    """
+    step = 1.0 / t.dwell_us / float(over_sampling)   # k-grid units per us
+    n_skip = max(int(ignore_samples), 0)
+    return {
+        "sequence_version": t.version,
+        "dead_time_us": float(t.acq_delay_total_us),
+        "gap_kgrid": float(t.acq_delay_total_us * step),
+        "ignore_samples": n_skip,
+        "gap_used_kgrid": float((t.acq_delay_total_us + n_skip * t.dwell_us) * step),
+        "centre_filled": False,
+    }
+
+
 def describe(t: SeqTiming, tune: TimingTuning) -> Dict[str, Any]:
     """Plain dict for logs, metadata and cache keys."""
     out = {"timing": asdict(t), "tuning": asdict(tune)}
@@ -252,5 +277,5 @@ def describe(t: SeqTiming, tune: TimingTuning) -> Dict[str, Any]:
 __all__ = [
     "SeqTiming", "TimingTuning", "TIMING_TUNING", "V1_TX_EVENT_US",
     "detect_version", "read_timing", "tuning_for", "ramp_window",
-    "sample_times_us", "ramp_terms", "dead_time_kgrid", "describe",
+    "sample_times_us", "ramp_terms", "dead_time_kgrid", "kspace_gap", "describe",
 ]

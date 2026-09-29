@@ -338,12 +338,19 @@ def get_trajectory(recon_info: Dict[str, Any],
         times_us, f_us, _ = timing_mod.ramp_terms(seq, tune, n_samples)
         timing_desc = timing_mod.describe(seq, tune)
         logger.debug(" + Ramp model: integral, %s", timing_desc)
-        gap = timing_mod.dead_time_kgrid(seq, over_sampling)
-        if seq.version == "zte" and gap > 1.0:
-            logger.warning(
+        # BRK-0059/BRK-0060: the unsampled centre is a property of the
+        # sequence and the user has nothing to do about it, so it is logged
+        # (info for a general ZTE gap over 1 k-grid unit, debug otherwise),
+        # never warned; the radius also goes into the result metadata (hook).
+        gap = timing_mod.kspace_gap(seq, over_sampling,
+                                    getattr(options, "ignore_samples", None) or 1)
+        if seq.version == "zte" and gap["gap_kgrid"] > 1.0:
+            logger.info(
                 "General ZTE: the first sample is %.1f k-grid units from the k-space "
-                "centre (dead time %.2f us); the centre is not filled, expect "
-                "low-frequency artifacts.", gap, seq.acq_delay_total_us)
+                "centre (dead time %.2f us); the centre is not filled.",
+                gap["gap_kgrid"], seq.acq_delay_total_us)
+        else:
+            logger.debug(" + k-space centre gap: %s", gap)
 
     option_for_hash = (
         float(traj_offset),

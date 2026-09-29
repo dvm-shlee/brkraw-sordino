@@ -181,17 +181,58 @@ def test_ramp_model_option_validation(tmp_path):
     assert o.correct_phase is False and o.ramp_model == "integral"
 
 
-def test_general_zte_warns_about_dead_time(tmp_path, caplog):
+def _zte_info():
     # triggerzte3-like timing: 6.2 us dead time, 0.625 us dwell, oversampling 4
     info = _info("zte", adt=6.2, bw=400000.0)
     info["OverSampling"] = 4.0
-    seq = timing.read_timing(info)
-    assert timing.dead_time_kgrid(seq, 4.0) == pytest.approx(6.2 / 0.625 / 4)
     info["Matrix"] = [8, 8, 8]
     info["NPro"] = 2 * calc_npro(8, 1.0)
-    with caplog.at_level("WARNING", logger="brkraw_sordino.traj"):
-        get_trajectory(info, _build_options({"cache_dir": str(tmp_path)}))
-    assert any("General ZTE" in r.message for r in caplog.records)
+    return info
+
+
+def test_kspace_gap_radii():
+    seq = timing.read_timing(_zte_info())
+    assert timing.dead_time_kgrid(seq, 4.0) == pytest.approx(6.2 / 0.625 / 4)
+    gap = timing.kspace_gap(seq, 4.0, 1)
+    assert gap["sequence_version"] == "zte" and gap["centre_filled"] is False
+    assert gap["dead_time_us"] == pytest.approx(6.2)
+    assert gap["gap_kgrid"] == pytest.approx(2.48)
+    assert gap["ignore_samples"] == 1
+    assert gap["gap_used_kgrid"] == pytest.approx((6.2 + 0.625) / 0.625 / 4)
+    assert timing.kspace_gap(seq, 4.0, 0)["gap_used_kgrid"] == pytest.approx(2.48)
     # real SORDINO v2 numbers (6.75 us, dwell 1/600 kHz, oversampling 8): ~0.5 unit
     seq2 = timing.SeqTiming("v2", 4.0, 6.75, 1e6 / 600000.0, 436.4, 164.6)
     assert timing.dead_time_kgrid(seq2, 8.0) == pytest.approx(0.50625)
+    assert timing.kspace_gap(seq2, 8.0, 1)["gap_used_kgrid"] == pytest.approx(0.50625 + 0.125)
+
+
+def test_general_zte_gap_is_logged_not_warned(tmp_path, caplog):
+    """BRK-0060: info log, no warning (was a warning in d9e8640)."""
+    with caplog.at_level("DEBUG", logger="brkraw_sordino.traj"):
+        get_trajectory(_zte_info(), _build_options({"cache_dir": str(tmp_path)}))
+    zte = [r for r in caplog.records if "General ZTE" in r.message]
+    assert len(zte) == 1 and zte[0].levelname == "INFO"
+    assert "2.5 k-grid units" in zte[0].getMessage()
+    assert not [r for r in caplog.records if r.levelno >= 30]
+
+
+def test_sordino_gap_is_debug_only(tmp_path, caplog):
+    with caplog.at_level("DEBUG", logger="brkraw_sordino.traj"):
+        get_trajectory(_info("v2"), _build_options({"cache_dir": str(tmp_path)}))
+    assert not [r for r in caplog.records if "General ZTE" in r.message]
+    gap = [r for r in caplog.records if "k-space centre gap" in r.getMessage()]
+    assert len(gap) == 1 and gap[0].levelname == "DEBUG"
+    assert not [r for r in caplog.records if r.levelno >= 30]
+
+
+def test_recon_metadata_records_gap(tmp_path):
+    from brkraw_sordino.hook import _recon_metadata
+
+    info = _zte_info()
+    meta = _recon_metadata(info, _build_options({"cache_dir": str(tmp_path), "ignore_samples": 2}))
+    gap = meta["kspace_gap"]
+    assert gap["gap_kgrid"] == pytest.approx(2.48)
+    assert gap["ignore_samples"] == 2
+    assert gap["gap_used_kgrid"] == pytest.approx((6.2 + 2 * 0.625) / 0.625 / 4)
+    del info["AcqDelayTotal_us"]
+    assert _recon_metadata(info, _build_options({"cache_dir": str(tmp_path)})) == {"kspace_gap": None}

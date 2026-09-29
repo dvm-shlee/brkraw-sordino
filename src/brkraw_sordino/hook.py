@@ -135,6 +135,26 @@ def _parse_recon_info(scan):
     return recon_info
 
 
+def _recon_metadata(recon_info: Dict[str, Any], options: Options) -> Dict[str, Any]:
+    """Facts about the reconstruction kept with the result (BRK-0060).
+
+    ``kspace_gap`` is ``timing.kspace_gap`` (radius of the unsampled k-space
+    centre in k-grid units, the centre is never filled), or None when the
+    timing values are not available. Stored on the scan as
+    ``scan._sordino_recon_meta`` and in the recon cache ``.json``.
+    """
+    from . import timing as timing_mod
+
+    try:
+        seq = timing_mod.read_timing(recon_info)
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.debug("No k-space gap metadata: %s", exc)
+        return {"kspace_gap": None}
+    gap = timing_mod.kspace_gap(seq, float(recon_info["OverSampling"]),
+                                getattr(options, "ignore_samples", None) or 1)
+    return {"kspace_gap": gap}
+
+
 def _get_fid_identity(fid_entry: FileIO) -> str:
     if isinstance(fid_entry, DatasetFile):
         return fid_entry.path
@@ -225,6 +245,8 @@ def get_dataobj(
         setattr(scan, "_sordino_spatial_shape", spatial_shape)
     except Exception:
         setattr(scan, "_sordino_spatial_shape", None)
+    recon_meta = _recon_metadata(recon_info, options)
+    setattr(scan, "_sordino_recon_meta", recon_meta)
     fid_entry = _get_fid_entry(scan)
     cache_params = _build_cache_params(scan, reco_id, fid_entry, options, recon_info)
     img_cache_path = build_recon_cache_path(options.cache_dir, cache_params)
@@ -323,6 +345,7 @@ def get_dataobj(
             {
                 "dtype": cached_dtype.str,
                 "shape": list(cached_shape),
+                "kspace_gap": recon_meta["kspace_gap"],
             },
         )
     else:

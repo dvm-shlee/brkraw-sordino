@@ -102,6 +102,10 @@ Supported keys:
 ## Notes
 
 - The hook reconstructs data using an adjoint NUFFT and returns magnitude images by default.
+- The k-space centre inside the dead time is not sampled and not filled. Its radius
+  (k-grid units, first acquired and first kept sample) is logged (info for a general
+  ZTE gap over one unit, debug otherwise) and kept as `scan._sordino_recon_meta["kspace_gap"]`
+  and in the recon cache `.json`.
 - Converted NIfTI outputs apply slope/intercept scaling for uint16 storage.
 - `ext_factors` scales the affine around the FOV center during conversion.
 - Multi-channel data defaults to merged channels; set `split_ch=true` to keep channels split.
