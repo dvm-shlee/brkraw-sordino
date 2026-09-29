@@ -338,6 +338,12 @@ def get_trajectory(recon_info: Dict[str, Any],
         times_us, f_us, _ = timing_mod.ramp_terms(seq, tune, n_samples)
         timing_desc = timing_mod.describe(seq, tune)
         logger.debug(" + Ramp model: integral, %s", timing_desc)
+        gap = timing_mod.dead_time_kgrid(seq, over_sampling)
+        if seq.version == "zte" and gap > 1.0:
+            logger.warning(
+                "General ZTE: the first sample is %.1f k-grid units from the k-space "
+                "centre (dead time %.2f us); the centre is not filled, expect "
+                "low-frequency artifacts.", gap, seq.acq_delay_total_us)
 
     option_for_hash = (
         float(traj_offset),

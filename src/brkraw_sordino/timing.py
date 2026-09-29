@@ -230,6 +230,17 @@ def ramp_terms(t: SeqTiming, tune: TimingTuning, n_samples: int):
     return times, F, tau
 
 
+def dead_time_kgrid(t: SeqTiming, over_sampling: float) -> float:
+    """[read] Radius of the unsampled k-space centre in k-grid units (1/FOV).
+
+    The first sample is acq_delay_total_us / dwell_us samples after the RF
+    centre; one k-grid unit is ``over_sampling`` samples along a spoke.
+    About 0.5 for the SORDINO data in WI-0056; 2.5 for the general-ZTE
+    fixture `triggerzte3`.
+    """
+    return t.acq_delay_total_us / t.dwell_us / float(over_sampling)
+
+
 def describe(t: SeqTiming, tune: TimingTuning) -> Dict[str, Any]:
     """Plain dict for logs, metadata and cache keys."""
     out = {"timing": asdict(t), "tuning": asdict(tune)}
@@ -241,5 +252,5 @@ def describe(t: SeqTiming, tune: TimingTuning) -> Dict[str, Any]:
 __all__ = [
     "SeqTiming", "TimingTuning", "TIMING_TUNING", "V1_TX_EVENT_US",
     "detect_version", "read_timing", "tuning_for", "ramp_window",
-    "sample_times_us", "ramp_terms", "describe",
+    "sample_times_us", "ramp_terms", "dead_time_kgrid", "describe",
 ]

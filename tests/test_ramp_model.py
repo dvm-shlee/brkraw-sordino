@@ -179,3 +179,19 @@ def test_ramp_model_option_validation(tmp_path):
         _build_options({"cache_dir": str(tmp_path), "ramp_model": "quadratic"})
     o = _build_options({"cache_dir": str(tmp_path), "correct_phase": "false"})
     assert o.correct_phase is False and o.ramp_model == "integral"
+
+
+def test_general_zte_warns_about_dead_time(tmp_path, caplog):
+    # triggerzte3-like timing: 6.2 us dead time, 0.625 us dwell, oversampling 4
+    info = _info("zte", adt=6.2, bw=400000.0)
+    info["OverSampling"] = 4.0
+    seq = timing.read_timing(info)
+    assert timing.dead_time_kgrid(seq, 4.0) == pytest.approx(6.2 / 0.625 / 4)
+    info["Matrix"] = [8, 8, 8]
+    info["NPro"] = 2 * calc_npro(8, 1.0)
+    with caplog.at_level("WARNING", logger="brkraw_sordino.traj"):
+        get_trajectory(info, _build_options({"cache_dir": str(tmp_path)}))
+    assert any("General ZTE" in r.message for r in caplog.records)
+    # real SORDINO v2 numbers (6.75 us, dwell 1/600 kHz, oversampling 8): ~0.5 unit
+    seq2 = timing.SeqTiming("v2", 4.0, 6.75, 1e6 / 600000.0, 436.4, 164.6)
+    assert timing.dead_time_kgrid(seq2, 8.0) == pytest.approx(0.50625)
