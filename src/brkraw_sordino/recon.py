@@ -154,6 +154,48 @@ def nufft_adjoint(kspace, traj, volume_shape, log_counter=0, operator='finufft')
     return complex_img
 
 
+def phase_correction_factor(recon_info: Dict[str, Any], options: Options,
+                            n_points: int) -> Optional[np.ndarray]:
+    """Per-projection accumulated phase of the ramped gradient (WI-0056).
+
+    The receiver frequency of projection i is ACQ_O1_list[i], set for the
+    target vector g(i); while the gradient still moves from g(i-1), spins at
+    the FOV offset collect phi_ij = 2*pi*(O1[i-1] - O1[i]) * tau_j, with
+    tau_j the integral of (1 - ramp fraction) from the phase reference (RF
+    centre) to sample j (timing.ramp_terms). Returns exp(-1j*phi) with shape
+    (n_pro, n_points), or None when no correction applies: option off, ramp
+    model not "integral", correct_ramptime off, no FOV offset (O1 list of
+    length 1), or a constant gradient (general ZTE).
+    The sign follows the phase observed on v2 data (WI-0056 run 3).
+    """
+    from . import timing as timing_mod
+
+    if not getattr(options, "correct_phase", True):
+        return None
+    if not getattr(options, "correct_ramptime", True):
+        return None
+    if getattr(options, "ramp_model", "integral") != "integral":
+        return None
+    o1 = np.asarray(recon_info.get("O1List_Hz") or [], dtype=float)
+    n_pro = int(recon_info.get("NPro") or 0)
+    if o1.size != n_pro or n_pro == 0:
+        if o1.size == 1:   # a single constant frequency: no FOV offset, nothing to correct
+            logger.debug(" - Phase correction not needed: single O1 value")
+        else:
+            logger.warning("Phase correction skipped: ACQ_O1_list has %s values, NPro is %s.",
+                           o1.size, n_pro)
+        return None
+    seq = timing_mod.read_timing(recon_info)
+    tune = timing_mod.tuning_for(seq.version)
+    _, _, tau_us = timing_mod.ramp_terms(seq, tune, n_points)
+    tau_s = np.asarray(tau_us, dtype=float) * 1e-6
+    if not np.any(tau_s):
+        return None
+    d = np.roll(o1, 1) - o1
+    logger.debug(" - Phase correction: version %s, max |step| %.1f Hz", seq.version, np.abs(d).max())
+    return np.exp(-2j * np.pi * np.outer(d, tau_s)).astype(np.complex64)
+
+
 def correct_offreso(kspace: np.ndarray, shift_freq: float, *, eff_bandwidth: float, over_sampling: float) -> np.ndarray:
     if shift_freq == 0.0:
         return kspace
@@ -170,8 +212,9 @@ def recon_dataobj(fid_fobj,
                   recon_info: Dict[str, Any],
                   img_fobj,
                   options: Options,
-                  override_buffer_size=None, 
-                  override_dtype=None):
+                  override_buffer_size=None,
+                  override_dtype=None,
+                  phase_factor=None):
     """Reconstruct image volumes from FID data and write to an output file.
 
     Args:
@@ -182,6 +225,8 @@ def recon_dataobj(fid_fobj,
         options (Options): Reconstruction options.
         override_buffer_size (Optional[int]): Override FID frame buffer size.
         override_dtype (Optional[np.dtype]): Override FID dtype.
+        phase_factor (Optional[np.ndarray]): (n_pro, n_points) factor from
+            ``phase_correction_factor``, applied to every frame and channel.
 
     Returns:
         np.dtype: Dtype of the reconstructed output volumes.
@@ -217,7 +262,11 @@ def recon_dataobj(fid_fobj,
         buffer = fid_fobj.read(buffer_size)
         vol = np.frombuffer(buffer, dtype=fid_dtype).reshape(fid_shape, order='F')
         vol = (vol[0] + 1j * vol[1])[np.newaxis, ...]
-        k_space = vol.squeeze().T[..., ignore_samples:]
+        k_full = vol.squeeze().T
+        if phase_factor is not None:
+            # (n_pro, n_points) single channel or (n_pro, n_rx, n_points)
+            k_full = k_full * (phase_factor if k_full.ndim == 2 else phase_factor[:, None, :])
+        k_space = k_full[..., ignore_samples:]
         rss_gb = _get_current_rss_gb()
         if rss_gb is None:
             logger.debug(" - Reconstruction k-space shape: %s", k_space.shape)

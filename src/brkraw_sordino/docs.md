@@ -82,6 +82,15 @@ Supported keys:
 - `num_frames`: int or null (default: None)
 - `correct_spoketiming`: bool (default: false)
 - `correct_ramptime`: bool (default: true)
+- `ramp_model`: `integral` or `legacy` (default: `integral`). `integral` places
+  each sample at the time integral of the ramping gradient from the RF centre,
+  with the ramp window of the sequence version (v1 `mjm_zte`, v2
+  `sordino_260122_trig`, v3 `sordino`, or a general ZTE with a constant
+  gradient); `legacy` is the trajectory used before this change. Timing values
+  and adjustments are declared in `timing.py`.
+- `correct_phase`: bool (default: true). Removes the per-projection phase the
+  FOV-offset frequency (`ACQ_O1_list`) leaves while the gradient ramps
+  (`integral` model only).
 - `offreso_freqs`: tuple (default: None)
 - `mem_limit`: float (default: 0.5)
 - `clear_cache`: bool (default: true)

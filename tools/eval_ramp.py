@@ -95,7 +95,7 @@ class EvalConfig:
     recon_start: Optional[int] = None
     recon_count: int = 60
     roi_half: int = 4
-    ramp_modes: Tuple[str, ...] = ("off", "code", "integral")
+    ramp_modes: Tuple[str, ...] = ("off", "pre", "post_traj", "post")
     ignore_samples: int = 1
     tau_range_us: float = 400.0
     tau_step_us: float = 0.05
@@ -183,69 +183,53 @@ def iter_volumes(fid_entry, recon_info: Dict[str, Any],
 
 
 def reconstruct(kspace_pro_pts: np.ndarray, traj: np.ndarray,
-                volume_shape: Sequence[int], ignore_samples: int) -> np.ndarray:
+                volume_shape: Sequence[int], ignore_samples: int,
+                phase_factor: Optional[np.ndarray] = None) -> np.ndarray:
     """One-channel adjoint NUFFT exactly as the hook does it."""
     from brkraw_sordino.recon import nufft_adjoint
 
-    k = kspace_pro_pts[..., ignore_samples:]
+    k = kspace_pro_pts if phase_factor is None else kspace_pro_pts * phase_factor
+    k = k[..., ignore_samples:]
     return nufft_adjoint(k, traj[:, ignore_samples:, ...], volume_shape, 1)
 
 
-TRAJ_MODES = ("off", "code", "integral")
-"""Trajectory variants compared in (c).
+TRAJ_MODES = ("off", "pre", "post_traj", "post")
+"""Reconstruction variants compared in (c), all through brkraw-sordino.
 
-off:      brkraw-sordino with correct_ramptime=False (constant vector).
-code:     brkraw-sordino with correct_ramptime=True (the current product form,
-          k_j = s_j * (g_prev + (g_cur - g_prev) * j / N)).
-integral: evaluation-only variant of the same assumptions (ramp from the
-          first sample over N samples, same offset and scaling) with k equal
-          to the integral of the ramp: s_j * g_prev + scale * (g_cur - g_prev)
-          * j**2 / (2 N). Not a product change; used to compare formulas.
+off:        correct_ramptime=False (constant vector per spoke).
+pre:        ramp_model="legacy", correct_phase=False: the code before WI-0056
+            (brkraw-sordino bf4447b), k_j = s_j (g_prev + (g_cur - g_prev) j/N).
+post_traj:  ramp_model="integral", correct_phase=False: integral trajectory
+            only (BRK-0056), to separate its effect from the phase correction.
+post:       ramp_model="integral", correct_phase=True: the new default.
 """
 
+_MODE_OPTIONS = {
+    "off": {"correct_ramptime": False, "correct_phase": False},
+    "pre": {"ramp_model": "legacy", "correct_phase": False},
+    "post_traj": {"ramp_model": "integral", "correct_phase": False},
+    "post": {"ramp_model": "integral", "correct_phase": True},
+}
 
-def trajectory(recon_info: Dict[str, Any], mode: str, cache_dir: Path) -> np.ndarray:
-    """Trajectory [n_pro, n_samples, 3] for one of ``TRAJ_MODES``."""
+
+def mode_options(mode: str, cache_dir: Path):
+    """brkraw-sordino Options for one of ``TRAJ_MODES``."""
     from brkraw_sordino.hook import _build_options
-    from brkraw_sordino.traj import get_trajectory
 
     if mode not in TRAJ_MODES:
-        raise ValueError(f"unknown trajectory mode {mode!r}")
-    if mode in ("off", "code"):
-        options = _build_options({"correct_ramptime": mode == "code",
-                                  "cache_dir": str(cache_dir)})
-        return get_trajectory(recon_info, options)
-    return integral_trajectory(recon_info)
+        raise ValueError(f"unknown mode {mode!r}")
+    return _build_options(dict(_MODE_OPTIONS[mode], cache_dir=str(cache_dir)))
 
 
-def integral_trajectory(recon_info: Dict[str, Any]) -> np.ndarray:
-    """Evaluation-only trajectory: current assumptions, integral ramp term.
+def trajectory(recon_info: Dict[str, Any], mode: str, cache_dir: Path):
+    """(trajectory [n_pro, n_samples, 3], phase factor or None) for a mode."""
+    from brkraw_sordino.recon import phase_correction_factor
+    from brkraw_sordino.traj import get_trajectory
 
-    Mirrors brkraw_sordino.traj.get_trajectory / calc_radial_traj3d
-    (same gradient vectors, sample count, offset factor and last-projection
-    rule; use_origin is not supported, as in the current code path) and only
-    replaces the ramp term (g_cur - g_prev) * j / N * s_j by its integral.
-    """
-    from brkraw_sordino.traj import calc_radial_grad3d
-
-    matrix = int(recon_info["Matrix"][0])
-    npro = int(recon_info["NPro"])
-    if recon_info["UseOrigin"]:
-        raise ValueError("integral_trajectory: UseOrigin not supported")
-    g = calc_radial_grad3d(matrix, npro, recon_info["HalfAcquisition"],
-                           recon_info["UseOrigin"], recon_info["Reorder"])
-    os_ = float(recon_info["OverSampling"])
-    off = float(recon_info["AcqDelayTotal_us"]) * 1e-6 * float(recon_info["EffBandwidth_Hz"]) * os_
-    n = int(matrix / 2 * os_)
-    j = np.arange(n, dtype=float)
-    s = ((j + off) / (n - 1)) / 2                     # current radius factor
-    unit = 1.0 / (n - 1) / 2                          # radius per sample
-    g_prev = np.roll(g, 1, axis=1)                    # i = 0 uses the last one
-    d = g - g_prev
-    traj = (s[None, :, None] * g_prev.T[:, None, :]
-            + unit * (j ** 2 / (2 * n))[None, :, None] * d.T[:, None, :])
-    traj[-1] = s[:, None] * g[:, -1][None, :]         # last projection: no ramp
-    return traj
+    options = mode_options(mode, cache_dir)
+    traj = get_trajectory(recon_info, options)
+    phase = phase_correction_factor(recon_info, options, int(traj.shape[1]))
+    return traj, phase
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +397,8 @@ def run(cfg: EvalConfig) -> Dict[str, Any]:
     rs = cfg.exclude if cfg.recon_start is None else cfg.recon_start
     recon_ids = set(range(rs, min(n_vol, rs + cfg.recon_count)))
     trajs = {m: trajectory(recon_info, m, cache_dir) for m in cfg.ramp_modes} if recon_ids else {}
+    # phase factor of the new default, also used for the first-peak phase metric
+    post_phase = trajs["post"][1] if "post" in trajs else trajectory(recon_info, "post", cache_dir)[1]
 
     keep = np.zeros((n_vol, n_rx, n_pro, cfg.n_keep), dtype=np.complex64)
     n_ph = cfg.phase_samples
@@ -434,8 +420,8 @@ def run(cfg: EvalConfig) -> Dict[str, Any]:
         if v in cfg.spoke_volumes:
             spoke_save[v] = vol.copy()
         if v in recon_ids:
-            for m, tr in trajs.items():
-                img = reconstruct(vol[0], tr, vol_shape, cfg.ignore_samples)
+            for m, (tr, ph) in trajs.items():
+                img = reconstruct(vol[0], tr, vol_shape, cfg.ignore_samples, ph)
                 mag = np.abs(img)
                 roi[m].append(float(mag[sl].mean()))
                 mean_img[m] = mag if mean_img[m] is None else mean_img[m] + mag
@@ -466,8 +452,17 @@ def run(cfg: EvalConfig) -> Dict[str, Any]:
             mean = img / len(roi[m])
             grad = np.sqrt(sum(np.square(np.gradient(mean, axis=a)) for a in range(3)))
             sharp[m] = float(grad.mean() / mean.mean())
+    # first-peak phase coherence across spokes, |sum z| / sum |z| per volume:
+    # the phase correction has unit magnitude, so |first peak| (a, b) cannot
+    # change; its effect on the raw FID shows in the phase agreement.
+    z1 = keep[:, 0, :, cfg.sample_index].astype(np.complex128)
+    coh_pre = (np.abs(z1.sum(axis=1)) / np.abs(z1).sum(axis=1)).tolist()
+    coh_post = None
+    if post_phase is not None:
+        z1p = z1 * post_phase[None, :, cfg.sample_index]
+        coh_post = (np.abs(z1p.sum(axis=1)) / np.abs(z1p).sum(axis=1)).tolist()
     rel_diff = {}
-    for a, b in (("code", "integral"), ("off", "code"), ("off", "integral")):
+    for a, b in (("pre", "post"), ("pre", "post_traj"), ("post_traj", "post"), ("off", "pre")):
         if mean_img.get(a) is not None and mean_img.get(b) is not None:
             ma, mb = mean_img[a] / len(roi[a]), mean_img[b] / len(roi[b])
             rel_diff[f"{a}-{b}"] = float(np.linalg.norm(ma - mb) / np.linalg.norm(mb))
@@ -509,13 +504,22 @@ def run(cfg: EvalConfig) -> Dict[str, Any]:
         "c_recon_roi_oscillation": osc_recon,
         "c_mean_image_sharpness": sharp,
         "c_mean_image_relative_difference": rel_diff,
-        "note_ab": "(a) and (b) use raw FID: they do not depend on the trajectory mode",
+        "note_ab": ("(a) and (b) use |raw FID|: neither the trajectory nor the "
+                    "unit-magnitude phase correction can change them"),
+        "a_first_peak_phase_coherence": {
+            "pre_median": float(np.median(coh_pre[cfg.exclude:] or coh_pre)),
+            "post_median": (float(np.median(coh_post[cfg.exclude:] or coh_post))
+                            if coh_post is not None else None),
+            "per_volume_file": "phase_coherence_per_volume.json"},
         "phase_timing": phase,
         "elapsed_s": round(time.time() - t0, 1),
     }
     (out / "cv_per_volume.json").write_text(json.dumps(cv_per_vol))
+    (out / "phase_coherence_per_volume.json").write_text(
+        json.dumps({"pre": coh_pre, "post": coh_post}))
     (out / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
-    plot(out, cfg, fp, cv_per_vol, stab, tc, cv_over_vol, roi, mean_img, phase)
+    plot(out, cfg, fp, cv_per_vol, stab, tc, cv_over_vol, roi, mean_img, phase,
+         coh_pre, coh_post)
     return summary
 
 
@@ -524,8 +528,51 @@ def run(cfg: EvalConfig) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def plot_orthogonal(path: Path, images: Dict[str, np.ndarray], title: str,
+                    pair: Tuple[str, str] = ("pre", "post")) -> None:
+    """Axial / coronal / sagittal centre planes of each image and of b - a.
+
+    Array axes are taken as (x, y, z) in reconstruction order; the planes are
+    the centre z (axial), y (coronal) and x (sagittal) slices. Display only:
+    no orientation correction is applied.
+    """
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    names = [n for n in pair if n in images]
+    rows = names + ([f"{pair[1]} - {pair[0]}"] if len(names) == 2 else [])
+    fig, ax = plt.subplots(len(rows), 3, figsize=(12, 4 * len(rows)))
+    ax = np.atleast_2d(ax)
+    ref = images[names[0]]
+    cx, cy, cz = (s // 2 for s in ref.shape)
+    vmax = float(np.percentile(ref, 99.5))
+
+    def planes(img):
+        return img[:, :, cz].T, img[:, cy, :].T, img[cx, :, :].T
+
+    diff = images[names[1]] - images[names[0]] if len(names) == 2 else None
+    lim = float(np.percentile(np.abs(diff), 99.5)) if diff is not None else 1.0
+    for r, name in enumerate(rows):
+        img = diff if (diff is not None and r == len(rows) - 1) else images[name]
+        for c, (plane, label) in enumerate(zip(planes(img), ("axial (z)", "coronal (y)", "sagittal (x)"))):
+            if img is diff:
+                im = ax[r, c].imshow(plane, cmap="coolwarm", vmin=-lim, vmax=lim, origin="lower")
+            else:
+                im = ax[r, c].imshow(plane, cmap="gray", vmin=0, vmax=vmax, origin="lower")
+            ax[r, c].set_title(f"{name}: {label}")
+            ax[r, c].set_xticks([]); ax[r, c].set_yticks([])
+        if img is diff:
+            rel = float(np.linalg.norm(diff) / np.linalg.norm(images[names[0]]))
+            ax[r, 0].set_ylabel(f"|diff|/|{pair[0]}| = {rel:.4f}")
+            fig.colorbar(im, ax=ax[r, 2], fraction=0.046)
+    fig.suptitle(title); fig.tight_layout()
+    fig.savefig(path, dpi=110); plt.close(fig)
+
+
 def plot(out: Path, cfg: EvalConfig, fp, cv_per_vol, stab, tc, cv_over_vol,
-         roi, mean_img, phase) -> None:
+         roi, mean_img, phase, coh_pre=None, coh_post=None) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -535,15 +582,22 @@ def plot(out: Path, cfg: EvalConfig, fp, cv_per_vol, stab, tc, cv_over_vol,
     n_vol = fp.shape[0]
     ex = cfg.exclude
 
-    # (a) first peak across spokes
-    fig, ax = plt.subplots(2, 1, figsize=(11, 7))
+    # (a) first peak across spokes (+ phase coherence pre/post)
+    fig, ax = plt.subplots(3, 1, figsize=(11, 10))
     for v in sorted({min(ex, n_vol - 1), n_vol // 2, n_vol - 1}):
         ax[0].plot(fp[v], lw=0.5, label=f"volume {v}")
     ax[0].set_xlabel("spoke"); ax[0].set_ylabel(f"|FID[{cfg.sample_index}]|")
     ax[0].legend(); ax[0].set_title(f"(a) first peak across spokes - {title}")
     ax[1].plot(cv_per_vol, lw=0.8)
     ax[1].axvline(ex - 0.5, color="grey", ls="--", lw=0.8)
-    ax[1].set_xlabel("volume"); ax[1].set_ylabel("CV across spokes")
+    ax[1].set_xlabel("volume"); ax[1].set_ylabel("CV of |first peak| across spokes")
+    if coh_pre is not None:
+        ax[2].plot(coh_pre, lw=0.8, label="pre (raw FID)")
+        if coh_post is not None:
+            ax[2].plot(coh_post, lw=0.8, label="post (phase corrected)")
+        ax[2].set_xlabel("volume"); ax[2].set_ylabel("|sum z| / sum |z|")
+        ax[2].set_title("first-peak phase coherence across spokes (1 = all in phase)")
+        ax[2].legend()
     fig.tight_layout(); fig.savefig(out / "a_first_peak_within_volume.png", dpi=120); plt.close(fig)
 
     # (b) pattern across volumes and first-peak time course
@@ -587,7 +641,10 @@ def plot(out: Path, cfg: EvalConfig, fp, cv_per_vol, stab, tc, cv_over_vol,
         means = {m: img / max(len(roi[m]), 1) for m, img in mean_img.items() if img is not None}
         if means:
             modes = list(means)
-            pairs = [(a, b) for a, b in (("code", "integral"), ("off", "code")) if a in means and b in means]
+            pairs = [(a, b) for a, b in (("post", "pre"), ("post", "post_traj")) if a in means and b in means]
+            if "pre" in means and "post" in means:
+                plot_orthogonal(out / "c_orthogonal_pre_post.png", means,
+                                f"{title}: mean image, pre vs post")
             ncol = len(modes) + len(pairs)
             fig, ax = plt.subplots(1, ncol, figsize=(4 * ncol, 4.2))
             ax = np.atleast_1d(ax)

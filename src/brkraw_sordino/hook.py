@@ -34,6 +34,8 @@ from .spoketiming import (
     correct_spoketiming,
 )
 from .orientation import correct as correct_orientation
+from .recon import phase_correction_factor
+from .timing import TIMING_TUNING
 
 FileIO = Union[DatasetFile, ZippedFile]
 logger = logging.getLogger(__name__)
@@ -79,6 +81,8 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         "clear_cache",
         "split_ch",
         "as_complex",
+        "ramp_model",
+        "correct_phase",
     }
     unknown_keys = sorted(set(kwargs.keys()) - known_keys)
     if unknown_keys:
@@ -102,7 +106,22 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         split_ch=bool(kwargs.get("split_ch", False)),
         cache_dir=cache_dir,
         as_complex=bool(kwargs.get("as_complex", False)),
+        ramp_model=_ramp_model(kwargs.get("ramp_model", "integral")),
+        correct_phase=_to_bool(kwargs.get("correct_phase", True)),
     )
+
+
+def _ramp_model(value: Any) -> str:
+    model = str(value).strip().lower()
+    if model not in ("integral", "legacy"):
+        raise ValueError("ramp_model must be 'integral' or 'legacy'")
+    return model
+
+
+def _to_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def _parse_recon_info(scan):
@@ -137,6 +156,7 @@ def _build_cache_params(
         "fid": _get_fid_identity(fid_entry),
         "options": asdict(options),
         "recon_info": recon_info,
+        "timing_tuning": {k: asdict(v) for k, v in TIMING_TUNING.items()},
     }
 
 
@@ -228,6 +248,8 @@ def get_dataobj(
     if cached_dtype is None or cached_shape is None:
         with fid_entry.open() as fid_fobj:
             traj = get_trajectory(recon_info, options)
+            phase_factor = phase_correction_factor(
+                recon_info, options, int(parse_fid_info(recon_info)[0][1]))
             img_temp_path = img_cache_path.with_suffix(img_cache_path.suffix + ".partial")
             if img_temp_path.exists():
                 try:
@@ -286,10 +308,12 @@ def get_dataobj(
                             options,
                             override_buffer_size=stc_param['buffer_size'],
                             override_dtype=stc_param['dtype'],
+                            phase_factor=phase_factor,
                         )
                 else:
                     logger.debug("Spoketiming correction disabled.")
-                    dtype = recon_dataobj(fid_fobj, traj, recon_info, img_fobj, options)
+                    dtype = recon_dataobj(fid_fobj, traj, recon_info, img_fobj, options,
+                                          phase_factor=phase_factor)
             os.replace(img_temp_path, img_cache_path)
         dataobj_shape = list(get_dataobj_shape(recon_info, options))
         cached_dtype = np.dtype(dtype)

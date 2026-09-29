@@ -17,6 +17,11 @@ class Options:
     split_ch: bool
     cache_dir: Path
     as_complex: bool
+    # WI-0056: "integral" (gradient integral, timing.py) or "legacy" (the
+    # form before WI-0056, kept for pre/post comparison).
+    ramp_model: str = "integral"
+    # WI-0056: per-projection accumulated phase correction (integral model only).
+    correct_phase: bool = True
 
 
 __all__ = [

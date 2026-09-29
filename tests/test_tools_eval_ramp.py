@@ -17,32 +17,34 @@ def _recon_info(matrix=16, os_=2.0):
         "Matrix": [matrix] * 3, "NPro": npro, "HalfAcquisition": False,
         "UseOrigin": False, "Reorder": False, "OverSampling": os_,
         "AcqDelayTotal_us": 6.75, "EffBandwidth_Hz": 75000.0,
+        "ExcPulLength_ms": 0.004, "RampTime_ms": 0.1164, "RampDelay_ms": 0.16,
+        "TrigSegmentMode": "Off", "MaximizeRampTime": None, "RFWait_ms": None,
+        "O1List_Hz": [0.0],
     }
 
 
-def test_integral_differs_from_product_only_in_ramp_term():
+def test_mode_options_map_to_product_settings(tmp_path):
+    for mode, (ramp_ok, model, phase) in {
+            "off": (False, "integral", False), "pre": (True, "legacy", False),
+            "post_traj": (True, "integral", False), "post": (True, "integral", True)}.items():
+        o = er.mode_options(mode, tmp_path)
+        assert (o.correct_ramptime, o.ramp_model, o.correct_phase) == (ramp_ok, model, phase)
+    with pytest.raises(ValueError):
+        er.mode_options("code", tmp_path)
+
+
+def test_pre_mode_is_the_previous_trajectory(tmp_path):
     info = _recon_info()
     matrix, npro, os_ = 16, info["NPro"], info["OverSampling"]
     g = product_traj.calc_radial_grad3d(matrix, npro, False, False, False)
     off = 6.75e-6 * 75000.0 * os_
-    code = product_traj.calc_radial_traj3d(g, matrix, False, os_, True, off)
-    integ = er.integral_trajectory(info)
-    n = int(matrix / 2 * os_)
-    j = np.arange(n, dtype=float)
-    unit = 1.0 / (n - 1) / 2
-    d = (g - np.roll(g, 1, axis=1)).T  # [pro, 3]
-    expected_gap = unit * ((j + off) * j / n - j ** 2 / (2 * n))
-    gap = code - integ
-    np.testing.assert_allclose(gap[:-1], expected_gap[None, :, None] * d[:-1, None, :],
-                               atol=1e-12)
-    np.testing.assert_allclose(gap[-1], 0.0, atol=1e-12)  # last projection: no ramp
-
-
-def test_integral_rejects_use_origin():
-    info = _recon_info()
-    info["UseOrigin"] = True
-    with pytest.raises(ValueError):
-        er.integral_trajectory(info)
+    ref = product_traj.calc_radial_traj3d(g, matrix, False, os_, True, off)
+    traj, phase = er.trajectory(info, "pre", tmp_path)
+    np.testing.assert_array_equal(traj, ref)
+    assert phase is None
+    post, post_phase = er.trajectory(info, "post", tmp_path)
+    assert post.shape == ref.shape and not np.allclose(post, ref)
+    assert post_phase is None          # O1 list of length 1: no FOV offset
 
 
 def test_detect_version():

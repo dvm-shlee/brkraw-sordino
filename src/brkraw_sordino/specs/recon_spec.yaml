@@ -101,3 +101,46 @@ Reorder:
     - file: method
       key: Reorder
   transform: to_bool
+
+# --- ramp-time and phase correction (timing.py, WI-0056) ---------------
+# Optional: missing keys give None (general ZTE has no RampTime).
+
+RampTime_ms:
+  sources:
+    - file: method
+      key: RampTime
+  transform: first_float
+
+RampDelay_ms:
+  sources:
+    - file: method
+      key: RampDelay
+  transform: first_float
+
+RFWait_ms:
+  sources:
+    - file: method
+      key: RFWait
+  transform: first_float
+
+MaximizeRampTime:
+  sources:
+    - file: method
+      key: MaximizeRampTime
+
+TrigSegmentMode:
+  sources:
+    - file: method
+      key: TrigSegmentMode
+
+ExcPulLength_ms:
+  sources:
+    - file: method
+      key: ExcPul
+  transform: first_float
+
+O1List_Hz:
+  sources:
+    - file: acqp
+      key: ACQ_O1_list
+  transform: convert_to_list
