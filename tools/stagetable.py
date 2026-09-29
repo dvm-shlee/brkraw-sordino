@@ -9,7 +9,7 @@ def format_value(value, fmt: str) -> str:
         return "nan"
     return format(value, fmt)
 
-def format_stage_table(row_labels: list[str], col_labels: list[str], cells: dict, fmt: str = ".4f", first_header: str = "지표") -> str:
+def format_stage_table(row_labels: list[str], col_labels: list[str], cells: dict, fmt: str = ".4f", first_header: str = "metric") -> str:
     if not row_labels or not col_labels:
         raise ValueError("row_labels and col_labels must not be empty")
 

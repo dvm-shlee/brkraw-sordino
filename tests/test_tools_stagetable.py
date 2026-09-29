@@ -1,4 +1,4 @@
-"""Parent-owned tests for WI-0056-LEE-4 (Park). Standard library only."""
+"""Parent-owned tests for WI-0056-LEE-4 and WI-0057-LEE-1 (Park). Standard library only."""
 import math
 import unittest
 from pathlib import Path
@@ -35,7 +35,7 @@ class StageTable(unittest.TestCase):
 
     def test_defaults_and_string_fmt(self):
         out = stagetable.format_stage_table(["a"], ["x", "y", "z"], {("a", "y"): 2.0}, fmt=".1f")
-        self.assertEqual(out, "| 지표 | x | y | z |\n| --- | --- | --- | --- |\n| a | - | 2.0 | - |")
+        self.assertEqual(out, "| metric | x | y | z |\n| --- | --- | --- | --- |\n| a | - | 2.0 | - |")
         out = stagetable.format_stage_table(["a"], ["x"], {("a", "x"): 0.5})
         self.assertEqual(out.splitlines()[-1], "| a | 0.5000 |")
 
@@ -48,7 +48,7 @@ class StageTable(unittest.TestCase):
     def test_order_and_no_trailing_newline(self):
         out = stagetable.format_stage_table(["b", "a"], ["y", "x"], {("a", "x"): "v", ("b", "y"): "w"})
         lines = out.split("\n")
-        self.assertEqual(lines[0], "| 지표 | y | x |")
+        self.assertEqual(lines[0], "| metric | y | x |")
         self.assertEqual(lines[2], "| b | w | - |")
         self.assertEqual(lines[3], "| a | - | v |")
         self.assertFalse(out.endswith("\n"))
