@@ -77,7 +77,9 @@ class Stage:
     phase: str
     label: str
     recon: str = "adjoint"   # "adjoint" (product), "fill" (WI-0058 S4z/S3z: adjoint + centre from the
-                             # least-squares image) or "curve" (WI-0058 run 2 S3c: first samples from the FID curve)
+                             # least-squares image), "curve" (WI-0058 run 2 S3c: first samples from a
+                             # Gaussian FID curve, replaced) or "exp" (WI-0058 run 3 S3e: exponential FID
+                             # envelope with one K0 shared by all spokes of the volume)
 
 
 STAGES: Tuple[Stage, ...] = (
@@ -100,6 +102,7 @@ STAGES_WI0058: Tuple[Stage, ...] = (
     Stage("S4z", "integral_delay", "integral_delay", "S4z S4 + estimated centre", "fill"),
     Stage("S3z", "integral", "integral", "S3z S3 + estimated centre", "fill"),
     Stage("S3c", "integral", "integral", "S3c S3 + FID-curve first samples", "curve"),
+    Stage("S3e", "integral", "integral", "S3e S3 + exponential FID, shared K0", "exp"),
 )
 ALL_STAGE_NAMES = STAGE_NAMES + tuple(s.name for s in STAGES_WI0058)
 
@@ -310,6 +313,47 @@ def _circular_std(z: np.ndarray) -> np.ndarray:
         return np.where(r >= 1.0, 0.0, np.sqrt(-2.0 * np.log(np.maximum(r, 1e-300))))
 
 
+def k0_metrics(k0_rec: Dict[str, List[np.ndarray]], k0_free: Dict[str, List[np.ndarray]],
+               exp_stats: Dict[str, List[Dict[str, Any]]], first_peak: np.ndarray,
+               recon_vols: Sequence[int]) -> Dict[str, Any]:
+    """How constant the estimated K0 is (WI-0058 run 3), per centre-filling stage.
+
+    spoke_rel_std:        std / mean of |K0_i| over the spokes of one volume (median over volumes);
+    spoke_phase_std_rad:  circular std of arg K0_i over the spokes of one volume (median);
+    volume_oscillation:   the BRK-0058 oscillation of the spoke-mean |K0| over the volumes;
+    ratio_to_sample1:     mean |K0| / mean |sample 1| of the same volume (median over volumes).
+    For S3z the value at k = 0 is one number per volume, so the spoke terms are 0."""
+    out: Dict[str, Any] = {}
+    fp = np.abs(first_peak[list(recon_vols)]) if len(recon_vols) else None
+    for name, vals in k0_rec.items():
+        if not vals:
+            continue
+        a = np.asarray(vals)
+        mag = np.abs(a)
+        mean_v = mag.mean(axis=1)
+        entry: Dict[str, Any] = {
+            "abs_mean": float(mag.mean()),
+            "spoke_rel_std": float(np.median(mag.std(axis=1) / np.maximum(mean_v, 1e-300))),
+            "spoke_phase_std_rad": float(np.median(_circular_std(a.T))),
+            "ratio_to_sample1": (float(np.median(mean_v / np.maximum(fp.mean(axis=1), 1e-300)))
+                                 if fp is not None else None),
+            "volume_oscillation": evalstats.oscillation(mean_v.tolist()) if len(mean_v) >= 3 else None,
+        }
+        if name in k0_free and k0_free[name]:
+            fr = np.abs(np.asarray(k0_free[name]))
+            entry["free_spoke_rel_std"] = float(np.median(fr.std(axis=1) / np.maximum(fr.mean(axis=1), 1e-300)))
+            entry["free_ratio_to_shared"] = float(np.median(fr.mean(axis=1) / np.maximum(mean_v, 1e-300)))
+        if name in exp_stats and exp_stats[name]:
+            st = exp_stats[name]
+            entry["drift_rel_across_volume"] = float(np.median([np.exp(x["a1"]) - 1.0 for x in st]))
+            entry["rms_log_magnitude_median"] = float(np.median([x["rms_log_magnitude"] for x in st]))
+            entry["rms_phase_rad_median"] = float(np.median([x["rms_phase_rad"] for x in st]))
+            entry["fit_cols"] = st[0]["fit_cols"]
+            entry["fit_radius_kgrid"] = st[0]["fit_radius_kgrid"]
+        out[name] = entry
+    return out
+
+
 def run(cfg: StageConfig) -> Dict[str, Any]:
     """Stream the scan once, reconstruct every stage, save arrays, figures and
     ``summary.json`` and ``stage_table.md``."""
@@ -367,6 +411,11 @@ def run(cfg: StageConfig) -> Dict[str, Any]:
     sl = tuple(slice(ci - h, ci + h + 1) for ci in c)
     rep_vol = None
     virtual: Dict[str, np.ndarray] = {}   # WI-0058 S3z/S4z: virtual leading samples per trajectory model
+    # WI-0058 run 3: K0 (value at k = 0) per reconstructed volume and spoke, per centre-filling stage
+    k0_rec: Dict[str, List[np.ndarray]] = {s.name: [] for s in stages_run if s.recon != "adjoint"}
+    k0_free: Dict[str, List[np.ndarray]] = {s.name: [] for s in stages_run if s.recon == "exp"}
+    exp_stats: Dict[str, List[Dict[str, Any]]] = {s.name: [] for s in stages_run if s.recon == "exp"}
+    recon_vols: List[int] = []
     n_read = 0
     for v, vol in eval_ramp.iter_volumes(fid_entry, recon_info, n_vol):
         z = vol[0, :, :n_ph].astype(np.complex128)
@@ -376,21 +425,36 @@ def run(cfg: StageConfig) -> Dict[str, Any]:
             coh[p][v] = _coherence(zp)
             cstd[p][v] = _circular_std(zp)
         if v in recon_ids:
+            recon_vols.append(v)
             for s in stages_run:
-                if s.recon == "curve":
+                if s.recon == "exp":
                     import eval_timing_centre
 
-                    img = eval_timing_centre.curve_fill_reconstruct(
-                        vol[0], trajs[s.traj], vol_shape, recon_info, cfg.ignore_samples, phases[s.phase])
+                    img, einfo = eval_timing_centre.exp_fill_reconstruct(
+                        vol[0], trajs[s.traj], vol_shape, recon_info, cfg.ignore_samples, phases[s.phase],
+                        return_info=True)
+                    k0_rec[s.name].append(einfo["k0"])
+                    k0_free[s.name].append(einfo["k0_free"])
+                    exp_stats[s.name].append({k: einfo[k] for k in ("a0", "a1", "p0", "p1", "rms_log_magnitude",
+                                                                    "rms_phase_rad", "fit_cols",
+                                                                    "fit_radius_kgrid")})
+                elif s.recon == "curve":
+                    import eval_timing_centre
+
+                    img, cinfo = eval_timing_centre.curve_fill_reconstruct(
+                        vol[0], trajs[s.traj], vol_shape, recon_info, cfg.ignore_samples, phases[s.phase],
+                        return_info=True)
+                    k0_rec[s.name].append(cinfo["k0"])
                 elif s.recon == "fill":
                     import eval_timing_centre
 
                     if s.traj not in virtual:   # virtual samples on this stage's own trajectory model
                         virtual[s.traj] = eval_timing_centre.leading_points(
                             recon_info, d_traj if s.traj == "integral_delay" else 0.0, cfg.ignore_samples)
-                    img = eval_timing_centre.centre_fill_reconstruct(
+                    img, finfo = eval_timing_centre.centre_fill_reconstruct(
                         vol[0], trajs[s.traj], vol_shape, cfg.ignore_samples, phases[s.phase], virtual[s.traj],
-                        n_iter=cfg.cg_iters, ext=cfg.cg_ext)
+                        n_iter=cfg.cg_iters, ext=cfg.cg_ext, return_info=True)
+                    k0_rec[s.name].append(np.full(n_pro, finfo["k0"]))
                 else:
                     img = eval_ramp.reconstruct(vol[0], trajs[s.traj], vol_shape, cfg.ignore_samples,
                                                 phases[s.phase])
@@ -410,6 +474,14 @@ def run(cfg: StageConfig) -> Dict[str, Any]:
         if mean_img[s.name] is not None:
             means[s.name] = mean_img[s.name] / len(roi[s.name])
             np.save(out / f"recon_mean_{s.name}.npy", means[s.name])
+    np.savez(out / "roi_timeseries.npz", volumes=np.asarray(recon_vols, dtype=int),
+             **{s.name: np.asarray(roi[s.name]) for s in stages_run})
+    k0_summary = k0_metrics(k0_rec, k0_free, exp_stats, first_peak, recon_vols)
+    if k0_rec:
+        np.savez(out / "k0_values.npz", volumes=np.asarray(recon_vols, dtype=int),
+                 **{f"k0_{n}": np.asarray(v, dtype=np.complex64) for n, v in k0_rec.items()},
+                 **{f"k0free_{n}": np.asarray(v, dtype=np.complex64) for n, v in k0_free.items()},
+                 sample1=first_peak[recon_vols] if recon_vols else first_peak[:0])
 
     # ---- (a) within a volume ------------------------------------------------
     fp_mag = np.abs(first_peak).astype(float)
@@ -490,6 +562,7 @@ def run(cfg: StageConfig) -> Dict[str, Any]:
             "cv_over_volumes_median": float(np.median(cv_over_vol)) if cv_over_vol else None},
         "b_phase": b_phase,
         "c": c_stage,
+        "k0": k0_summary,
         "elapsed_s": round(time.time() - t0, 1),
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=1, default=str))

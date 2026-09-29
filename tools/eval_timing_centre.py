@@ -72,8 +72,9 @@ try:
     import curvefit
     import eval_ramp
     import peakfit
+    import sharedfit
 except ImportError:  # pragma: no cover - run from another folder
-    from tools import curvefit, eval_ramp, peakfit  # type: ignore
+    from tools import curvefit, eval_ramp, peakfit, sharedfit  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -732,8 +733,11 @@ def centre_fill_reconstruct(kspace: np.ndarray, traj: np.ndarray, shape: Sequenc
     tr = np.concatenate([virtual_traj, traj[:, ignore_samples:, ...]], axis=1)
     img = nufft_adjoint(data, tr, shape, 1)
     if return_info:
+        # K0: the least-squares image's value at k = 0 (one value, the same for every spoke)
+        k0 = complex(np.asarray(_operator(np.zeros((1, 1, 3)), info["grid_shape"]).op(
+            info["x_full"].astype(np.complex64))).reshape(-1)[0])
         return img, {"virtual_samples": int(virtual_traj.shape[1]), "cg_residual_norms": info["residual_norms"],
-                     "virtual_values": pred}
+                     "virtual_values": pred, "k0": k0}
     return img
 
 
@@ -835,13 +839,17 @@ def curve_fill_data(kspace: np.ndarray, traj: np.ndarray, recon_info: Dict[str, 
     rep = list(range(int(ignore_samples), int(first)))
     new_traj = np.concatenate([vtraj, traj[:, rep, :]], axis=1)
     new_t = np.concatenate([vt, times[rep]])
-    est = curve_restore(k, traj, times, cols, new_traj, new_t, matrix, model)
+    # one extra point at k = 0, t = 0 gives each spoke's own K0 (not part of the image data)
+    est0 = curve_restore(k, traj, times, cols,
+                         np.concatenate([np.zeros_like(new_traj[:, :1]), new_traj], axis=1),
+                         np.concatenate([[0.0], new_t]), matrix, model)
+    k0, est = est0[:, 0], est0[:, 1:]
     data = np.concatenate([est, k[:, int(first):]], axis=1)
     tr = np.concatenate([new_traj, traj[:, int(first):, :]], axis=1)
     r = np.linalg.norm(traj, axis=-1).mean(axis=0) * matrix
     info = {"fit_cols": cols, "fit_radius_kgrid": [float(r[cols[0]]), float(r[cols[-1]])],
             "virtual_samples": int(vtraj.shape[1]), "replaced_kept": rep, "estimated": est,
-            "model": model, "first_sample": int(first), "max_kgrid": float(max_kgrid)}
+            "model": model, "first_sample": int(first), "max_kgrid": float(max_kgrid), "k0": k0}
     return data, tr, info
 
 
@@ -853,6 +861,128 @@ def curve_fill_reconstruct(kspace: np.ndarray, traj: np.ndarray, shape: Sequence
     from brkraw_sordino.recon import nufft_adjoint
 
     data, tr, info = curve_fill_data(kspace, traj, recon_info, ignore_samples, phase_factor, model)
+    img = nufft_adjoint(data, tr, shape, 1)
+    return (img, info) if return_info else img
+
+
+# ---------------------------------------------------------------------------
+# S3e: exponential FID envelope with one K0 shared by all spokes (WI-0058 run 3)
+# ---------------------------------------------------------------------------
+#
+# BRK-0064 / BRK-0065 (a), the Director's model:
+#   1. the FID follows the theoretical envelope: steep at first, flatter later
+#      (an exponential decay in time from the RF centre);
+#   2. every spoke of a volume passes k = 0, so all spokes share ONE K0; spokes
+#      may differ only through their acquisition time within the volume;
+#   3. sample 1 is real data (not filter settling) and is part of the fit.
+# Per spoke i (acquisition order), sample j at time t_j (us, RF centre = 0),
+# s_i = i / (n_pro - 1) - 1/2:
+#
+#     ln|y_ij|   = A0 + A1 s_i - beta_i t_j          (A0, A1 shared; beta_i per spoke)
+#     arg y_ij   = P0 + P1 s_i + omega_i t_j          (P0, P1 shared; omega_i per spoke)
+#     K0_i       = exp(A0 + A1 s_i) exp(i (P0 + P1 s_i))
+#
+# fitted jointly by least squares (``sharedfit``, Lee Minjun, wi-0058-lee-3)
+# over samples 1 .. the CURVE_MAX_KGRID window (at least CURVE_MIN_SAMPLES).
+# The model then fills the dropped sample 0 and the dead time down to the RF
+# centre (``leading_points``); every measured sample from sample 1 on enters
+# unchanged. Closest precedent: per-projection curve fitting of the missing
+# FID points (Kuethe 1999); the shared K0 across spokes is this tool's own
+# constraint (no precedent found in the WI-0058 literature table).
+
+EXP_FIRST_SAMPLE: int = 1
+
+
+def spoke_order_coordinate(n_pro: int) -> np.ndarray:
+    """s_i = i / (n_pro - 1) - 1/2 for spokes in acquisition order."""
+    if n_pro < 2:
+        return np.zeros(max(int(n_pro), 0))
+    return np.arange(int(n_pro), dtype=float) / (int(n_pro) - 1) - 0.5
+
+
+def _line_fit_rows(x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Unweighted straight line y_ij = a_i + b_i x_j per row (x shared)."""
+    xm = x.mean()
+    b = ((y - y.mean(axis=1, keepdims=True)) * (x - xm)).sum(axis=1) / np.square(x - xm).sum()
+    return y.mean(axis=1) - b * xm, b
+
+
+def exp_shared_fit(z: np.ndarray, times_us: np.ndarray, fit_cols: Sequence[int],
+                   drift: bool = True) -> Dict[str, Any]:
+    """Joint fit of the S3e model on z (n_pro, N) over fit_cols.
+
+    The unwrapped phase of every spoke is first moved by a multiple of 2 pi so
+    that its own intercept lies on the branch of the spoke-mean intercept (the
+    shared P0 needs one branch). Also returns each spoke's free (unshared)
+    exponential intercept, to show how far the data alone are from one K0."""
+    cols = list(fit_cols)
+    t = np.asarray(times_us, dtype=float)[cols]
+    zc = np.asarray(z)[:, cols]
+    n_pro = zc.shape[0]
+    s = spoke_order_coordinate(n_pro)
+    lm = np.log(np.maximum(np.abs(zc), 1e-300))
+    ph = np.unwrap(np.angle(zc), axis=1)
+    a_free, beta_free = _line_fit_rows(t, lm)
+    c_free, _ = _line_fit_rows(t, ph)
+    ref = float(np.angle(np.exp(1j * c_free).mean()))
+    shift = 2 * np.pi * np.round((c_free - ref) / (2 * np.pi))
+    ph = ph - shift[:, None]
+    c_free = c_free - shift
+    xs = [t.tolist()] * n_pro
+    a0, a1, nb = sharedfit.shared_intercept_fit(xs, lm.tolist(), s.tolist(), drift=drift)
+    p0, p1, om = sharedfit.shared_intercept_fit(xs, ph.tolist(), s.tolist(), drift=drift)
+    beta = -np.asarray(nb)
+    omega = np.asarray(om)
+    k0 = np.exp(a0 + a1 * s) * np.exp(1j * (p0 + p1 * s))
+    return {"fit_cols": cols, "a0": float(a0), "a1": float(a1), "p0": float(p0), "p1": float(p1),
+            "beta_per_us": beta, "omega_rad_per_us": omega, "s": s, "k0": k0,
+            "k0_free": np.exp(a_free) * np.exp(1j * c_free), "beta_free_per_us": -beta_free,
+            "rms_log_magnitude": float(sharedfit.shared_residual_rms(xs, lm.tolist(), s.tolist(), a0, a1, nb)),
+            "rms_phase_rad": float(sharedfit.shared_residual_rms(xs, ph.tolist(), s.tolist(), p0, p1, om)),
+            "drift": bool(drift)}
+
+
+def exp_model_values(fit: Dict[str, Any], times_us: Sequence[float]) -> np.ndarray:
+    """(n_pro, M) S3e model values at times_us."""
+    tt = np.asarray(times_us, dtype=float)[None, :]
+    s = fit["s"][:, None]
+    mag = np.exp(fit["a0"] + fit["a1"] * s - fit["beta_per_us"][:, None] * tt)
+    ph = fit["p0"] + fit["p1"] * s + fit["omega_rad_per_us"][:, None] * tt
+    return mag * np.exp(1j * ph)
+
+
+def exp_fill_data(kspace: np.ndarray, traj: np.ndarray, recon_info: Dict[str, Any],
+                  ignore_samples: int, phase_factor: Optional[np.ndarray], drift: bool = True,
+                  max_kgrid: float = CURVE_MAX_KGRID):
+    """S3e data: the model at the dropped samples and the dead time
+    (``leading_points``, down to the RF centre), measured values from the
+    first kept sample on. Returns (data, traj, info)."""
+    matrix = int(recon_info["Matrix"][0])
+    k = kspace if phase_factor is None else kspace * phase_factor
+    n = k.shape[1]
+    times = np.asarray(tuned_terms(recon_info, 0.0, n)[0], dtype=float)
+    first = max(int(ignore_samples), EXP_FIRST_SAMPLE)
+    cols = curve_window(traj, matrix, first, max_kgrid)
+    fit = exp_shared_fit(k, times, cols, drift)
+    vtraj = leading_points(recon_info, 0.0, ignore_samples)
+    vt = leading_times(recon_info, ignore_samples)
+    est = exp_model_values(fit, vt)
+    data = np.concatenate([est, k[:, int(ignore_samples):]], axis=1)
+    tr = np.concatenate([vtraj, traj[:, int(ignore_samples):, :]], axis=1)
+    r = np.linalg.norm(traj, axis=-1).mean(axis=0) * matrix
+    info = dict(fit, fit_radius_kgrid=[float(r[cols[0]]), float(r[cols[-1]])],
+                virtual_samples=int(vtraj.shape[1]), estimated=est, virtual_times_us=vt)
+    return data, tr, info
+
+
+def exp_fill_reconstruct(kspace: np.ndarray, traj: np.ndarray, shape: Sequence[int],
+                         recon_info: Dict[str, Any], ignore_samples: int,
+                         phase_factor: Optional[np.ndarray], drift: bool = True,
+                         return_info: bool = False):
+    """S3e: the product's adjoint (|k|^2 weight) over ``exp_fill_data``."""
+    from brkraw_sordino.recon import nufft_adjoint
+
+    data, tr, info = exp_fill_data(kspace, traj, recon_info, ignore_samples, phase_factor, drift)
     img = nufft_adjoint(data, tr, shape, 1)
     return (img, info) if return_info else img
 

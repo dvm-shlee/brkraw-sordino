@@ -32,16 +32,19 @@ COLORS: Dict[str, str] = {
     "S2": "#56B4E9",
     "S3": "#0072B2",        # product default
     "S3z": "#D55E00",       # S3 + centre from the least-squares image
-    "S3c": "#009E73",       # S3 + first samples restored from the FID curve
+    "S3c": "#009E73",       # S3 + first samples from a Gaussian FID curve (run 2, replaced)
+    "S3e": "#882255",       # S3 + exponential FID envelope, one K0 shared by all spokes (run 3)
     "truth": "#000000",
     "old": "#CC79A7",       # a superseded result shown for comparison
 }
 
 LABELS: Dict[str, str] = {
     "raw": "measured",
-    "S0": "S0 no ramp", "S1": "S1 legacy", "S1p": "S1 + phase", "S1h": "S1h legacy/2",
-    "S1hp": "S1h + phase", "S2": "S2 integral", "S3": "S3 integral + phase",
-    "S3z": "S3z image least squares", "S3c": "S3c FID curve", "truth": "truth", "old": "before the fix",
+    "S0": "S0 no ramp", "S1": "S1 legacy code", "S1p": "S1+φ legacy + its phase", "S1h": "S1h legacy, curvature /2",
+    "S1hp": "S1h+φ legacy /2 + its phase", "S2": "S2 integral trajectory",
+    "S3": "S3 integral trajectory + FID phase",
+    "S3z": "S3z algebraic (image least squares)", "S3c": "S3c Gaussian curve (replaced)",
+    "S3e": "S3e exponential FID, shared K0", "truth": "truth", "old": "before the fix",
 }
 
 FIGSIZE: Tuple[float, float] = (6.4, 4.2)

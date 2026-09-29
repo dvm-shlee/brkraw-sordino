@@ -109,7 +109,8 @@ def test_cg_beats_adjoint_on_model_data():
 
 def test_wi0058_stages_and_config():
     assert es.STAGE_NAMES == ("S0", "S1", "S1p", "S1h", "S1hp", "S2", "S3")
-    assert es.ALL_STAGE_NAMES[-5:] == ("S4p", "S4", "S4z", "S3z", "S3c")
+    assert es.ALL_STAGE_NAMES[-6:] == ("S4p", "S4", "S4z", "S3z", "S3c", "S3e")
+    assert es.stage("S3e").recon == "exp" and es.stage("S3e").traj == "integral"
     assert es.stage("S3z").recon == "fill" and es.stage("S3z").traj == "integral"
     assert es.stage("S3c").recon == "curve" and es.stage("S3c").phase == "integral"
     es.StageConfig(dataset="x", scan_id=1, out_dir="y", stages=("S3", "S3z", "S3c")).check()   # no delay needed
@@ -334,3 +335,109 @@ def test_s3c_moves_image_towards_gap_free_reference():
         return np.linalg.norm(s * a - ref) / np.linalg.norm(ref)
 
     assert err(s3c) < 0.5 * err(s3)
+
+
+def _exp_model_fid(info, a0=0.3, a1=-0.05, p0=2.9, p1=0.2, seed=7):
+    """FID exactly of the S3e form: one K0 per volume (with a drift in spoke
+    order), per-spoke exponential decay rate and phase slope in time."""
+    tr = etc.delayed_trajectory(info, 0.0)
+    n_pro, n = tr.shape[:2]
+    times = np.asarray(etc.tuned_terms(info, 0.0, n)[0])
+    rng = np.random.default_rng(seed)
+    beta = rng.uniform(0.01, 0.05, n_pro)
+    omega = rng.uniform(-0.02, 0.02, n_pro)
+    s = etc.spoke_order_coordinate(n_pro)
+
+    def model(t):
+        t = np.asarray(t, dtype=float)[None, :]
+        return (np.exp(a0 + a1 * s[:, None] - beta[:, None] * t)
+                * np.exp(1j * (p0 + p1 * s[:, None] + omega[:, None] * t)))
+
+    return tr, times, model, s
+
+
+def test_exp_shared_fit_recovers_shared_k0():
+    """S3e (WI-0058 run 3): an FID of the exact model form is recovered: the
+    shared intercept, drift, per-spoke decay and the K0 of every spoke; the
+    phase intercept near +-pi needs the branch alignment."""
+    info = _recon_info(matrix=16, os_=8.0)
+    tr, times, model, s = _exp_model_fid(info)
+    y = model(times)
+    data, tr_all, einfo = etc.exp_fill_data(y, tr, info, 1, None)
+    assert einfo["fit_cols"][0] == etc.EXP_FIRST_SAMPLE == 1        # sample 1 is part of the fit
+    assert abs(einfo["a0"] - 0.3) < 1e-9 and abs(einfo["a1"] + 0.05) < 1e-9
+    assert abs(einfo["p1"] - 0.2) < 1e-9
+    assert abs(np.angle(np.exp(1j * (einfo["p0"] - 2.9)))) < 1e-9
+    np.testing.assert_allclose(einfo["k0"], model([0.0])[:, 0], rtol=1e-9)
+    np.testing.assert_allclose(einfo["k0_free"], model([0.0])[:, 0], rtol=1e-9)
+    assert einfo["rms_log_magnitude"] < 1e-12
+    # the dead time and sample 0 are filled with the model, measured samples pass through
+    vt = etc.leading_times(info, 1)
+    np.testing.assert_allclose(einfo["estimated"], model(vt), rtol=1e-9)
+    mv = einfo["virtual_samples"]
+    np.testing.assert_array_equal(data[:, mv:], y[:, 1:])
+    assert tr_all.shape[:2] == data.shape
+    np.testing.assert_allclose(tr_all[:, mv:], tr[:, 1:])
+
+
+def test_exp_shared_fit_without_drift_and_with_noise():
+    info = _recon_info(matrix=16, os_=8.0)
+    tr, times, model, s = _exp_model_fid(info, a1=0.0, p1=0.0)
+    rng = np.random.default_rng(2)
+    y = model(times)
+    y = y * (1 + 0.01 * rng.standard_normal(y.shape))
+    cols = etc.curve_window(tr, 16, 1)
+    fit = etc.exp_shared_fit(y, times, cols, drift=False)
+    assert fit["a1"] == 0.0 and fit["p1"] == 0.0
+    assert abs(fit["a0"] - 0.3) < 0.01
+    # the free per-spoke intercepts scatter more than the shared one (noise only)
+    assert np.std(np.abs(fit["k0_free"])) > np.std(np.abs(fit["k0"]))
+
+
+def test_exp_fill_moves_image_towards_gap_free_reference():
+    """Model data following the S3e form exactly: S3e is (nearly) the adjoint
+    with the true values in the gap, much closer than S3 (gap left empty)."""
+    from brkraw_sordino.recon import nufft_adjoint
+
+    info = _recon_info(matrix=16, os_=8.0)
+    shape = [16] * 3
+    tr, times, model, s = _exp_model_fid(info)
+    y = model(times)
+    vtraj = etc.leading_points(info, 0.0, 1)
+    vt = etc.leading_times(info, 1)
+    ref = np.abs(nufft_adjoint(np.concatenate([model(vt), y[:, 1:]], axis=1),
+                               np.concatenate([vtraj, tr[:, 1:]], axis=1), shape, 1))
+    s3 = np.abs(er.reconstruct(y, tr, shape, 1))
+    s3e = np.abs(etc.exp_fill_reconstruct(y, tr, shape, info, 1, None))
+    e3 = np.linalg.norm(s3 - ref) / np.linalg.norm(ref)
+    e3e = np.linalg.norm(s3e - ref) / np.linalg.norm(ref)
+    assert e3e < 1e-6 < e3
+
+
+def test_centre_fill_and_curve_report_k0():
+    info = _recon_info(matrix=16, os_=8.0)
+    shape = [16] * 3
+    img = etc.smooth_phantom(shape)
+    tr = etc.delayed_trajectory(info, 0.0)
+    y = etc._operator(tr, shape).op(img).reshape(tr.shape[:2])
+    vtraj = etc.leading_points(info, 0.0, 1)
+    _, finfo = etc.centre_fill_reconstruct(y, tr, shape, 1, None, vtraj, n_iter=10, ext=1, return_info=True)
+    true_k0 = complex(np.asarray(etc._operator(np.zeros((1, 1, 3)), shape).op(img)).reshape(-1)[0])
+    assert abs(finfo["k0"] - true_k0) < 0.02 * abs(true_k0)
+    _, cinfo = etc.curve_fill_reconstruct(y, tr, shape, info, 1, None, return_info=True)
+    assert cinfo["k0"].shape == (tr.shape[0],)
+
+
+def test_k0_metrics():
+    n_pro = 50
+    first_peak = np.full((4, n_pro), 2.0 + 0j)
+    shared = [np.full(n_pro, 3.0 + 0j) * (1 + 0.01 * v) for v in range(3)]
+    free = [np.linspace(2.0, 4.0, n_pro).astype(complex) for _ in range(3)]
+    stats = [{"a0": 1.0, "a1": 0.0, "p0": 0.0, "p1": 0.0, "rms_log_magnitude": 0.1, "rms_phase_rad": 0.2,
+              "fit_cols": [1, 2, 3], "fit_radius_kgrid": [0.5, 1.5]}] * 3
+    m = es.k0_metrics({"S3e": shared, "S3z": [np.full(n_pro, 1.0 + 1j)] * 3}, {"S3e": free}, {"S3e": stats},
+                      first_peak, [1, 2, 3])
+    assert abs(m["S3e"]["ratio_to_sample1"] - 1.5 * 1.01) < 1e-9
+    assert m["S3e"]["spoke_rel_std"] < 1e-12 and m["S3z"]["spoke_phase_std_rad"] < 1e-6
+    assert m["S3e"]["free_spoke_rel_std"] > 0.1 and m["S3e"]["drift_rel_across_volume"] == 0.0
+    assert m["S3e"]["volume_oscillation"]["rel_std"] < 1e-9     # a linear trend only
