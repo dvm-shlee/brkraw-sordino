@@ -7,7 +7,7 @@ converter_hook:
           - file: method
             key: Method
     if:
-      regex: ["$method", "sordino"]
+      regex: ["$method", "(?i)(sordino|zte)"]
     use: "sordino"
 
 info_spec:
@@ -19,7 +19,7 @@ info_spec:
           - file: method
             key: Method
     if:
-      regex: ["$method", "sordino"]
+      regex: ["$method", "(?i)(sordino|zte)"]
     use: "sordino_info"
 
 metadata_spec:
@@ -31,5 +31,5 @@ metadata_spec:
           - file: method
             key: Method
     if:
-      regex: ["$method", "sordino"]
+      regex: ["$method", "(?i)(sordino|zte)"]
     use: "sordino_metadata"
