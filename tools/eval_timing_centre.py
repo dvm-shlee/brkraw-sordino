@@ -69,10 +69,11 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 
 try:
+    import curvefit
     import eval_ramp
     import peakfit
 except ImportError:  # pragma: no cover - run from another folder
-    from tools import eval_ramp, peakfit  # type: ignore
+    from tools import curvefit, eval_ramp, peakfit  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -585,10 +586,28 @@ def density_weight(traj: np.ndarray) -> np.ndarray:
 
 
 def _operator(traj: np.ndarray, shape: Sequence[int]):
+    """finufft operator at k positions ``traj`` (|k| = 0.5 is Nyquist).
+
+    mrinufft (``proper_trajectory(normalize="pi")``, 1.5.1) multiplies a
+    trajectory by 2 pi when its largest |omega| is below 0.5 rad, assuming it
+    was given in [-0.5, 0.5). The radians passed here are below 0.5 rad
+    whenever all points lie within about 5 k-grid units of the centre (the
+    virtual leading samples, the gap points, a probe of the first samples),
+    so such an operator silently evaluated k at 2 pi times the radius
+    (WI-0058 run 2). The samples are therefore set again, unchanged, through
+    ``update_samples(unsafe=True)``; full spokes (|omega| up to pi) are not
+    affected either way.
+    """
+    import warnings
+
     from mrinufft import get_operator
 
-    return get_operator("finufft")(traj.reshape(-1, 3) / 0.5 * np.pi, shape=tuple(int(s) for s in shape),
-                                   density=False)
+    omega = np.asarray(traj.reshape(-1, 3) / 0.5 * np.pi, dtype=np.float64)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Samples will be rescaled")
+        op = get_operator("finufft")(omega, shape=tuple(int(s) for s in shape), density=False)
+    op.update_samples(np.asarray(omega, order="F"), unsafe=True)
+    return op
 
 
 def cg_reconstruct(kspace: np.ndarray, traj: np.ndarray, shape: Sequence[int], ignore_samples: int = 1,
@@ -716,6 +735,126 @@ def centre_fill_reconstruct(kspace: np.ndarray, traj: np.ndarray, shape: Sequenc
         return img, {"virtual_samples": int(virtual_traj.shape[1]), "cg_residual_norms": info["residual_norms"],
                      "virtual_values": pred}
     return img
+
+
+# ---------------------------------------------------------------------------
+# S3c: first samples restored from the FID curve (WI-0058 run 2)
+# ---------------------------------------------------------------------------
+
+#: Fit window of the curve (WI-0058 run 2). The receiver-filter settling is a
+#: time-domain effect counted in samples (sample 0 about 0.55x, sample 1 about
+#: 1.2x the smooth curve on every scan; from sample 2 on within about 5 %), so
+#: the fit starts at sample CURVE_FIRST_SAMPLE; the object's k-space profile is
+#: a k-space effect, so it ends at CURVE_MAX_KGRID k-grid units (spoke-mean
+#: radius; beyond about 2 units the profile nears its first zero and the phase
+#: jumps), extended by index to at least CURVE_MIN_SAMPLES samples.
+CURVE_FIRST_SAMPLE: int = 2
+CURVE_MAX_KGRID: float = 1.6
+CURVE_MIN_SAMPLES: int = 3
+
+
+def leading_times(recon_info: Dict[str, Any], ignore_samples: int = 1) -> np.ndarray:
+    """Times (us, RF centre = 0) of ``leading_points``: t_first - m * dwell >= 0, increasing."""
+    from brkraw_sordino import timing
+
+    seq = timing.read_timing(recon_info)
+    times, _, _ = tuned_terms(recon_info, 0.0, ignore_samples + 1)
+    t_first = times[ignore_samples]
+    ts = []
+    m = 1
+    while t_first - m * seq.dwell_us >= 0:
+        ts.append(t_first - m * seq.dwell_us)
+        m += 1
+    return np.asarray(sorted(ts), dtype=float)
+
+
+def curve_window(traj: np.ndarray, matrix: int, first: int = CURVE_FIRST_SAMPLE,
+                 max_kgrid: float = CURVE_MAX_KGRID, min_samples: int = CURVE_MIN_SAMPLES) -> List[int]:
+    """Fit samples first, first + 1, ... while the spoke-mean radius is <= max_kgrid
+    (k-grid units), at least min_samples of them."""
+    r = np.linalg.norm(traj, axis=-1).mean(axis=0) * int(matrix)
+    n = traj.shape[1]
+    last = int(first)
+    while last + 1 < n and r[last + 1] <= max_kgrid:
+        last += 1
+    last = max(last, int(first) + int(min_samples) - 1)
+    if last >= n:
+        raise ValueError(f"curve window from sample {first} needs {min_samples} samples; only {n - first}")
+    return list(range(int(first), last + 1))
+
+
+def curve_restore(z: np.ndarray, traj: np.ndarray, times_us: np.ndarray, fit_cols: Sequence[int],
+                  new_traj: np.ndarray, new_times_us: np.ndarray, matrix: int,
+                  model: str = "k2") -> np.ndarray:
+    """Per-spoke FID-curve values at new positions (Kuethe 1999 style, 1-D per spoke).
+
+    z: (n_pro, N) complex FID (after the phase factor); traj: (n_pro, N, 3);
+    times_us: (N,) sample times; new_traj (n_pro, M, 3) and new_times_us (M,)
+    the positions to fill. Magnitude: log|z| fitted over fit_cols, linear in
+    x = |k|^2 (model "k2", k in k-grid units: a Gaussian, flat at k = 0) or
+    in x = t (model "t": a straight line on a log scale in time). Phase:
+    unwrapped phase linear in t over the same samples. Uses curvefit (Lee
+    Minjun, wi-0058-lee-2). Returns (n_pro, M) complex."""
+    if model not in ("k2", "t"):
+        raise ValueError(model)
+    cols = list(fit_cols)
+    tf = [float(times_us[j]) for j in cols]
+    tn = [float(t) for t in new_times_us]
+    if model == "k2":
+        xf_all = np.square(traj[:, cols, :] * matrix).sum(-1)
+        xn_all = np.square(new_traj * matrix).sum(-1)
+    out = np.zeros((z.shape[0], len(tn)), dtype=np.complex128)
+    for i in range(z.shape[0]):
+        zi = z[i, cols]
+        xf = xf_all[i].tolist() if model == "k2" else tf
+        xn = xn_all[i].tolist() if model == "k2" else tn
+        mag = curvefit.extrapolate_log_magnitude(xf, np.abs(zi).tolist(), xn, degree=1)
+        ph = curvefit.extrapolate_phase(tf, np.angle(zi).tolist(), tn, degree=1)
+        out[i] = np.asarray(mag) * np.exp(1j * np.asarray(ph))
+    return out
+
+
+def curve_fill_data(kspace: np.ndarray, traj: np.ndarray, recon_info: Dict[str, Any],
+                    ignore_samples: int, phase_factor: Optional[np.ndarray], model: str = "k2",
+                    first: int = CURVE_FIRST_SAMPLE, max_kgrid: float = CURVE_MAX_KGRID):
+    """S3c data: the FID curve at the dropped samples and the dead time
+    (``leading_points``, down to the RF centre) and at the kept samples before
+    the fit window (from ignore_samples up to first - 1: receiver-filter
+    settling); measured values from the fit window on.
+    Returns (data (n_pro, M + N - first), traj (n_pro, M + N - first, 3), info)."""
+    matrix = int(recon_info["Matrix"][0])
+    k = kspace if phase_factor is None else kspace * phase_factor
+    n = k.shape[1]
+    times, _, _ = tuned_terms(recon_info, 0.0, n)
+    times = np.asarray(times, dtype=float)
+    if first < ignore_samples:
+        raise ValueError("the fit window cannot start at a dropped sample")
+    cols = curve_window(traj, matrix, first, max_kgrid)
+    vtraj = leading_points(recon_info, 0.0, ignore_samples)
+    vt = leading_times(recon_info, ignore_samples)
+    rep = list(range(int(ignore_samples), int(first)))
+    new_traj = np.concatenate([vtraj, traj[:, rep, :]], axis=1)
+    new_t = np.concatenate([vt, times[rep]])
+    est = curve_restore(k, traj, times, cols, new_traj, new_t, matrix, model)
+    data = np.concatenate([est, k[:, int(first):]], axis=1)
+    tr = np.concatenate([new_traj, traj[:, int(first):, :]], axis=1)
+    r = np.linalg.norm(traj, axis=-1).mean(axis=0) * matrix
+    info = {"fit_cols": cols, "fit_radius_kgrid": [float(r[cols[0]]), float(r[cols[-1]])],
+            "virtual_samples": int(vtraj.shape[1]), "replaced_kept": rep, "estimated": est,
+            "model": model, "first_sample": int(first), "max_kgrid": float(max_kgrid)}
+    return data, tr, info
+
+
+def curve_fill_reconstruct(kspace: np.ndarray, traj: np.ndarray, shape: Sequence[int],
+                           recon_info: Dict[str, Any], ignore_samples: int,
+                           phase_factor: Optional[np.ndarray], model: str = "k2",
+                           return_info: bool = False):
+    """S3c: the product's adjoint (|k|^2 weight) over ``curve_fill_data``."""
+    from brkraw_sordino.recon import nufft_adjoint
+
+    data, tr, info = curve_fill_data(kspace, traj, recon_info, ignore_samples, phase_factor, model)
+    img = nufft_adjoint(data, tr, shape, 1)
+    return (img, info) if return_info else img
 
 
 def centre_points(recon_info: Dict[str, Any], delta_us: float,
@@ -890,4 +1029,6 @@ def simulate(recon_info: Dict[str, Any], true_traj_us: float, true_phase_us: Opt
 __all__ = ["tuned_terms", "delayed_trajectory", "delayed_phase_factor", "o1_steps",
            "coherence_vs_delay", "estimate_delay", "estimate_delay_regression", "reduce_problem",
            "consistency_residual", "estimate_delay_consistency", "estimate_timing", "delay_pass",
-           "plot_delay", "density_weight", "cg_reconstruct", "centre_points", "smooth_phantom", "simulate"]
+           "plot_delay", "density_weight", "cg_reconstruct", "centre_points", "smooth_phantom", "simulate",
+           "CURVE_FIRST_SAMPLE", "CURVE_MAX_KGRID", "CURVE_MIN_SAMPLES", "leading_times", "curve_window", "curve_restore", "curve_fill_data",
+           "curve_fill_reconstruct"]

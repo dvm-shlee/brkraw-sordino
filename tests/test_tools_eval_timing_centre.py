@@ -109,9 +109,10 @@ def test_cg_beats_adjoint_on_model_data():
 
 def test_wi0058_stages_and_config():
     assert es.STAGE_NAMES == ("S0", "S1", "S1p", "S1h", "S1hp", "S2", "S3")
-    assert es.ALL_STAGE_NAMES[-4:] == ("S4p", "S4", "S4z", "S3z")
+    assert es.ALL_STAGE_NAMES[-5:] == ("S4p", "S4", "S4z", "S3z", "S3c")
     assert es.stage("S3z").recon == "fill" and es.stage("S3z").traj == "integral"
-    es.StageConfig(dataset="x", scan_id=1, out_dir="y", stages=("S3", "S3z")).check()   # no delay needed
+    assert es.stage("S3c").recon == "curve" and es.stage("S3c").phase == "integral"
+    es.StageConfig(dataset="x", scan_id=1, out_dir="y", stages=("S3", "S3z", "S3c")).check()   # no delay needed
     assert es.stage("S4z").recon == "fill" and es.stage("S4").traj == "integral_delay"
     assert es.stage("S4p").traj == "integral" and es.stage("S4p").phase == "integral_delay"
     with pytest.raises(ValueError):
@@ -237,3 +238,99 @@ def test_leading_points_reach_the_centre():
     assert np.all(r_v.max(axis=1) < r_1) and np.all(r_v.min(axis=1) < r_1 / vp.shape[1] + 1e-12)
     # the latest virtual sample is exactly sample 0 (same time t1 - dwell)
     np.testing.assert_allclose(vp[:, -1], tr[:, 0], atol=1e-14)
+
+
+def test_operator_near_centre_is_not_rescaled():
+    """WI-0058 run 2: mrinufft rescales a trajectory whose |omega| < 0.5 rad
+    by 2 pi. An operator built on near-centre points only must give the same
+    values as a direct DFT and as an operator that also holds a far point."""
+    shape = (16, 16, 16)
+    rng = np.random.default_rng(3)
+    img = (rng.standard_normal(shape) + 1j * rng.standard_normal(shape)).astype(np.complex64)
+    near = rng.uniform(-0.01, 0.01, size=(5, 4, 3))       # |k| < 0.02 -> |omega| < 0.2 rad
+    far = np.array([[[0.49, 0.0, 0.0]]])
+    grid = np.meshgrid(*[np.arange(s) - s // 2 for s in shape], indexing="ij")
+    direct = np.array([(img * np.exp(-2j * np.pi * sum(k[d] * grid[d] for d in range(3)))).sum()
+                       for k in near.reshape(-1, 3)])
+    got = np.asarray(etc._operator(near, shape).op(img)).reshape(-1)
+    both = np.asarray(etc._operator(np.concatenate([near.reshape(1, -1, 3), far], axis=1), shape).op(img)).reshape(-1)[:-1]
+    ratio = both / direct          # mrinufft's own fixed scale (depends on the grid only)
+    assert np.abs(ratio - ratio.mean()).max() <= 1e-4 * np.abs(ratio.mean())
+    assert np.allclose(got, both, rtol=1e-4, atol=1e-4 * np.abs(both).max())
+    # adjoint of the same operator is consistent: <A x, v> = <x, A^H v>
+    v = (rng.standard_normal(near.size // 3) + 1j * rng.standard_normal(near.size // 3)).astype(np.complex64)
+    op = etc._operator(near, shape)
+    lhs = np.vdot(op.op(img), v)
+    rhs = np.vdot(img.reshape(-1), op.adj_op(v).reshape(-1))
+    assert abs(lhs - rhs) <= 1e-3 * abs(lhs)
+
+
+def test_curve_restore_recovers_gaussian_profile():
+    """S3c (WI-0058 run 2): an FID that is exactly Gaussian in |k| with a phase
+    linear in t is restored exactly at the leading positions and sample 1."""
+    info = _recon_info(matrix=16, os_=8.0)
+    m = 16
+    tr = etc.delayed_trajectory(info, 0.0)
+    n = tr.shape[1]
+    times = np.asarray(etc.tuned_terms(info, 0.0, n)[0])
+    rng = np.random.default_rng(5)
+    amp = rng.uniform(1.0, 2.0, tr.shape[0])[:, None]
+    b = rng.uniform(0.2, 0.5, tr.shape[0])[:, None]
+    ph0 = rng.uniform(-3, 3, tr.shape[0])[:, None]
+
+    def model(traj, t):
+        k2 = np.square(traj * m).sum(-1)
+        return amp * np.exp(-b * k2) * np.exp(1j * (ph0 + 0.01 * t[None, :]))
+
+    y = model(tr, times)
+    data, tr_all, cinfo = etc.curve_fill_data(y, tr, info, 1, None)
+    r = np.linalg.norm(tr, axis=-1).mean(0) * m
+    cols = cinfo["fit_cols"]
+    assert cols[0] == etc.CURVE_FIRST_SAMPLE == 2 and cols == list(range(2, cols[-1] + 1))
+    assert len(cols) >= 3 and (r[cols[-1]] <= 1.6 or len(cols) == 3) and r[cols[-1] + 1] > 1.6
+    assert cinfo["replaced_kept"] == [1]
+    vt = etc.leading_times(info, 1)
+    vtraj = etc.leading_points(info, 0.0, 1)
+    mv = cinfo["virtual_samples"]
+    assert mv == vtraj.shape[1] == len(vt)
+    want = np.concatenate([model(vtraj, vt), y[:, cinfo["replaced_kept"]]], axis=1)
+    np.testing.assert_allclose(cinfo["estimated"], want, rtol=1e-9, atol=1e-12)
+    # measured samples after the replaced ones are passed through unchanged
+    first = 1 + len(cinfo["replaced_kept"])
+    np.testing.assert_array_equal(data[:, mv + len(cinfo["replaced_kept"]):], y[:, first:])
+    assert tr_all.shape[:2] == data.shape
+    # the "t" model (straight line in log|FID| against time) does not recover it
+    est_t = etc.curve_restore(y, tr, times, cinfo["fit_cols"], vtraj, vt, m, model="t")
+    assert np.abs(np.abs(est_t[:, 0]) / np.abs(model(vtraj, vt)[:, 0]) - 1).mean() > 0.05
+
+
+def test_curve_window_extends_to_three_samples():
+    info = _recon_info(matrix=16, os_=2.0)          # 0.5 k-grid units per sample
+    tr = etc.delayed_trajectory(info, 0.0)
+    assert etc.curve_window(tr, 16) == [2, 3, 4]      # radius limit alone would leave fewer
+    with pytest.raises(ValueError):
+        etc.curve_window(tr[:, :4], 16)               # not enough samples at all
+
+
+def test_s3c_moves_image_towards_gap_free_reference():
+    """Model data of a smooth object: S3c (curve fill) is closer to the adjoint
+    with the true values in the gap than S3 (gap left empty)."""
+    from brkraw_sordino.recon import nufft_adjoint
+
+    info = _recon_info(matrix=16, os_=8.0)
+    shape = [16] * 3
+    img = etc.smooth_phantom(shape)
+    tr = etc.delayed_trajectory(info, 0.0)
+    y = etc._operator(tr, shape).op(img).reshape(tr.shape[:2])
+    vtraj = etc.leading_points(info, 0.0, 1)
+    yv = etc._operator(vtraj, shape).op(img).reshape(vtraj.shape[:2])
+    ref = np.abs(nufft_adjoint(np.concatenate([yv, y[:, 1:]], axis=1),
+                               np.concatenate([vtraj, tr[:, 1:]], axis=1), shape, 1))
+    s3 = np.abs(er.reconstruct(y, tr, shape, 1))
+    s3c = np.abs(etc.curve_fill_reconstruct(y, tr, shape, info, 1, None))
+
+    def err(a):
+        s = float((a * ref).sum() / (a * a).sum())
+        return np.linalg.norm(s * a - ref) / np.linalg.norm(ref)
+
+    assert err(s3c) < 0.5 * err(s3)

@@ -76,7 +76,8 @@ class Stage:
     traj: str
     phase: str
     label: str
-    recon: str = "adjoint"   # "adjoint" (product) or "fill" (WI-0058 S4z: adjoint + estimated centre)
+    recon: str = "adjoint"   # "adjoint" (product), "fill" (WI-0058 S4z/S3z: adjoint + centre from the
+                             # least-squares image) or "curve" (WI-0058 run 2 S3c: first samples from the FID curve)
 
 
 STAGES: Tuple[Stage, ...] = (
@@ -98,6 +99,7 @@ STAGES_WI0058: Tuple[Stage, ...] = (
     Stage("S4", "integral_delay", "integral_delay", "S4 S3 + traj and phase delays"),
     Stage("S4z", "integral_delay", "integral_delay", "S4z S4 + estimated centre", "fill"),
     Stage("S3z", "integral", "integral", "S3z S3 + estimated centre", "fill"),
+    Stage("S3c", "integral", "integral", "S3c S3 + FID-curve first samples", "curve"),
 )
 ALL_STAGE_NAMES = STAGE_NAMES + tuple(s.name for s in STAGES_WI0058)
 
@@ -278,7 +280,7 @@ class StageConfig:
     delay_traj_us: Optional[float] = None   # WI-0058: sample-time shift seen by the trajectory (S4, S4z)
     delay_phase_us: Optional[float] = None  # WI-0058: shift seen by the O1-step phase (S4p, S4, S4z)
     cg_iters: int = 10                 # WI-0058: conjugate-gradient iterations of S4z
-    cg_ext: int = 2                    # WI-0058: S4z grid covers cg_ext x the FOV (central FOV kept)
+    cg_ext: int = 1                    # WI-0058: S3z/S4z grid covers cg_ext x the FOV (run 2: 1, see eval_timing_centre)
 
     def check(self) -> None:
         if self.exclude < 0 or self.recon_count < 0 or self.roi_half < 0:
@@ -375,7 +377,12 @@ def run(cfg: StageConfig) -> Dict[str, Any]:
             cstd[p][v] = _circular_std(zp)
         if v in recon_ids:
             for s in stages_run:
-                if s.recon == "fill":
+                if s.recon == "curve":
+                    import eval_timing_centre
+
+                    img = eval_timing_centre.curve_fill_reconstruct(
+                        vol[0], trajs[s.traj], vol_shape, recon_info, cfg.ignore_samples, phases[s.phase])
+                elif s.recon == "fill":
                     import eval_timing_centre
 
                     if s.traj not in virtual:   # virtual samples on this stage's own trajectory model

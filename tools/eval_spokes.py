@@ -4,9 +4,12 @@ Two figure families the Director asked for, drawn for every condition
 
     S0, S1, S1+p, S1h, S1h+p, S2, S3   (run 5 stage matrix, ``eval_stages``)
     S3z                                (WI-0058: S3 + estimated k-space centre)
+    S3c                                (WI-0058 run 2: S3 + first samples restored
+                                        from the FID curve)
 
 1. accumulated FID: every spoke of one volume drawn semi-transparent against
-   the sample index, the spoke mean on top (magnitude and phase);
+   the sample index, the spoke mean on top (|FID| only: Director, WI-0058
+   run 2, "magnitude 한 값을 넣는게 맞는것같아요");
 2. first-peak phase within the volume: the phase across spokes and the
    difference between neighbouring spokes, raw and after each condition's
    correction, plus the correction itself and the first-peak k position.
@@ -24,6 +27,9 @@ What a condition changes in these curves (by principle):
                                          the unsampled leading positions
                                          (dropped sample 0 and the dead time,
                                          down to the RF centre)
+    S3c:                                 S3's FID with the FID-curve values there
+                                         and at the kept samples inside 0.7
+                                         k-grid units (receiver-filter settling)
 
 Development tool, not part of the installed package; product code unchanged.
 """
@@ -46,10 +52,10 @@ except ImportError:  # pragma: no cover - run from another folder
     from tools import circstats, eval_ramp, eval_stages, offsetstack  # type: ignore
 
 
-CONDITIONS: Tuple[str, ...] = ("S0", "S1", "S1p", "S1h", "S1hp", "S2", "S3", "S3z")
+CONDITIONS: Tuple[str, ...] = ("S0", "S1", "S1p", "S1h", "S1hp", "S2", "S3", "S3z", "S3c")
 LABELS = {"S0": "S0 no ramp", "S1": "S1 legacy", "S1p": "S1+phase", "S1h": "S1h legacy/2",
           "S1hp": "S1h+phase", "S2": "S2 integral", "S3": "S3 integral+phase",
-          "S3z": "S3z S3+centre"}
+          "S3z": "S3z S3+centre", "S3c": "S3c S3+FID curve"}
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +85,8 @@ def neighbour_stats(z: np.ndarray) -> Dict[str, float]:
 
 
 def condition_fid(vol: np.ndarray, factor: Optional[np.ndarray], virtual: Optional[np.ndarray] = None,
-                  ignore_samples: int = 1) -> Tuple[np.ndarray, np.ndarray]:
+                  ignore_samples: int = 1, replaced: Optional[Dict[int, np.ndarray]] = None
+                  ) -> Tuple[np.ndarray, np.ndarray]:
     """(sample index, FID) of one condition for one volume (vol: n_pro x N).
 
     factor: exp(-i phi) of the condition's phase model or None (raw FID).
@@ -87,8 +94,14 @@ def condition_fid(vol: np.ndarray, factor: Optional[np.ndarray], virtual: Option
     before the first kept sample, times t_first - m * dwell in increasing
     order; they take the sample indices ignore_samples - M .. ignore_samples - 1
     and replace the dropped samples. Measured samples keep their index.
+    replaced: S3c only, {kept sample index: (n_pro,) curve values} put in place
+    of those measured samples.
     """
     z = vol if factor is None else vol * factor
+    if replaced:
+        z = np.array(z, copy=True)
+        for j, val in replaced.items():
+            z[:, j] = val
     n = z.shape[1]
     if virtual is None:
         return np.arange(n, dtype=float), z
@@ -124,7 +137,7 @@ def fid_curves(x: np.ndarray, z: np.ndarray, norm: float, sample_x: float, n_pha
 def spoke_pass(dataset: str, scan_id: int, out_dir: str, volume: int, stat_start: int = 10,
                stat_count: int = 100, sample_index: int = 1, n_phase: int = 16, n_zoom: int = 32,
                ignore_samples: int = 1, max_lines: int = 3200, cache_dir: Optional[str] = None,
-               cg_iters: int = 10, cg_ext: int = 2, conditions: Sequence[str] = CONDITIONS,
+               cg_iters: int = 10, cg_ext: int = 1, conditions: Sequence[str] = CONDITIONS,
                label: str = "") -> Dict[str, Any]:
     """Stream volumes 0 .. max(volume, stat_start + stat_count - 1) of a scan
     once; draw the per-spoke figures for ``volume``; neighbour statistics of the
@@ -190,13 +203,30 @@ def spoke_pass(dataset: str, scan_id: int, out_dir: str, volume: int, stat_start
         virt_info = {"virtual_samples": int(virtual.shape[1]),
                      "virtual_radius_kgrid": (np.linalg.norm(vtraj, axis=2).mean(axis=0) * matrix).tolist()}
 
+    # S3c: FID-curve values at the same leading positions and the kept samples inside the window start
+    curve_virtual = None
+    curve_replaced: Dict[int, np.ndarray] = {}
+    if "S3c" in stages:
+        s = stages["S3c"]
+        _, _, cinfo = eval_timing_centre.curve_fill_data(vol_keep, trajs[s.traj], recon_info, ignore_samples,
+                                                         factors[s.phase])
+        m = cinfo["virtual_samples"]
+        curve_virtual = cinfo["estimated"][:, :m]
+        curve_replaced = {j: cinfo["estimated"][:, m + q] for q, j in enumerate(cinfo["replaced_kept"])}
+        virt_info["s3c"] = {"fit_cols": cinfo["fit_cols"], "replaced_kept": cinfo["replaced_kept"],
+                            "virtual_samples": m, "model": cinfo["model"],
+                            "fit_radius_kgrid": cinfo["fit_radius_kgrid"]}
+
     norm = float(np.abs(vol_keep[:, sample_index]).mean())
     step = max(1, int(np.ceil(n_pro / max_lines)))
     line_idx = np.arange(0, n_pro, step)
     curves: Dict[str, Dict[str, Any]] = {}
     for c, s in stages.items():
         f = factors[s.phase]
-        x, z = condition_fid(vol_keep, f, virtual if s.recon == "fill" else None, ignore_samples)
+        if s.recon == "curve":
+            x, z = condition_fid(vol_keep, f, curve_virtual, ignore_samples, curve_replaced)
+        else:
+            x, z = condition_fid(vol_keep, f, virtual if s.recon == "fill" else None, ignore_samples)
         curves[c] = fid_curves(x, z, norm, float(sample_index), n_phase, line_idx)
         curves[c]["correction"] = None if f is None else np.angle(f)
         if s.recon == "fill":
@@ -325,7 +355,7 @@ def plot_accumulated(path: Path, curves, names, title: str, sample_index: int, i
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(1, 3, figsize=(21, 1.35 * len(names) + 2.5))
+    fig, ax = plt.subplots(1, 2, figsize=(14, 1.35 * len(names) + 2.5))
     full = {n: {"x": curves[n]["x"], "mean": curves[n]["mag_mean"], "lines": curves[n]["mag_lines"],
                 "dashed": curves[n]["mag_coherent"]} for n in names}
     lay = draw_stack(ax[0], names, full)
@@ -340,13 +370,8 @@ def plot_accumulated(path: Path, curves, names, title: str, sample_index: int, i
     ax[1].axvline(ignore_samples - 0.5, color="C2", lw=0.8, ls="--")
     ax[1].axvline(sample_index, color="0.4", lw=0.6, ls=":")
     ax[1].set_title(f"|FID|, first {n_zoom} samples (green: product drops samples left of the line;\n"
-                    f"S3z: estimated values there, down to k = 0) " + _scale_text(lay, ""), fontsize=9)
-    ph = {n: {"x": curves[n]["x_phase"], "mean": curves[n]["phase_mean"], "lines": curves[n]["phase_lines"]}
-          for n in names}
-    lay = draw_stack(ax[2], names, ph, clip_pct=0.5, alpha=0.04)
-    ax[2].axvline(sample_index, color="0.4", lw=0.6, ls=":")
-    ax[2].set_title(f"phase relative to each spoke's first peak (sample {sample_index}), rad, samples < {n_phase},\n"
-                    "values clipped to the 0.5-99.5 % band; " + _scale_text(lay, "rad"), fontsize=9)
+                    f"S3z, S3c: estimated values there, down to k = 0) " + _scale_text(lay, ""), fontsize=9)
+    # |FID| only (Director, WI-0058 run 2); the phase stays in spoke_fid_correction_phase.png
     for a in ax:
         a.set_xlabel("sample index")
     fig.suptitle(f"{title}: all spokes (blue, semi-transparent), spoke mean (black), "
