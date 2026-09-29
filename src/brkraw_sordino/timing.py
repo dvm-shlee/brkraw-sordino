@@ -104,11 +104,16 @@ class TimingTuning:
     phase_ref_us:          phase reference time relative to the RF centre
                            (0 = RF centre, observed on v2 in WI-0056 run 3).
 
-    Observation to adjust against (WI-0056 run 3, not applied): the phase of
-    the first samples followed the model on v2 but was offset by about
-    -2.5 us on v1 and +2.4 us on v3 (delay of the O1-step phase versus the
-    sample time). The cause is not known; try ``acq_start_offset_us`` or
-    ``phase_ref_us`` with the evaluation tool before changing the model.
+    Why every entry is 0 (BRK-0061): the WI-0056 run-3 estimate (maximise
+    the O1-step coherence of the first samples) put the phase about -2.5 us
+    (v1) and +2.4 us (v3) away from the model, but that estimator is biased
+    by the object's own spoke phase: on simulated data with no delay it gave
+    +1.65, +2.70 and -3.52 us (WI-0058). The data-consistency estimate in
+    ``tools/eval_timing_centre.py`` puts the phase delay within 0.5 us of the
+    model on the v1, v2 and v3 functional scans; the recheck with the fixed
+    near-centre NUFFT operator gave the same values (WI-0057). So there is no
+    timing offset to correct. Change a value here only after a trajectory
+    measurement or a phantom scan (v3), checked with the evaluation tool.
     """
 
     ramp_start_offset_us: float = 0.0

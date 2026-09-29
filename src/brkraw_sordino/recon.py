@@ -147,11 +147,47 @@ def nufft_adjoint(kspace, traj, volume_shape, log_counter=0, operator='finufft')
         logger.debug(" - DCF shape: %s", dcf.shape)
         logger.debug(" - Trajectory shape: %s", traj.shape)
         logger.debug(" - Volume shape: %s", volume_shape)
-    traj = traj.copy() / 0.5 * np.pi
-    
-    nufft_op = get_operator(operator)(traj, shape=volume_shape, density=dcf)
+    omega = traj.reshape(-1, traj.shape[-1]) / 0.5 * np.pi
+    nufft_op = make_nufft_operator(omega, volume_shape, dcf, operator)
     complex_img = nufft_op.adj_op(kspace.flatten())
     return complex_img
+
+
+def make_nufft_operator(omega, volume_shape, density, operator='finufft'):
+    """NUFFT operator at the radian coordinates ``omega`` (shape (M, 3), [-pi, pi)).
+
+    mrinufft (``proper_trajectory(normalize="pi")``, checked on 1.5.1)
+    multiplies a trajectory by 2 pi when its largest |omega| is below about
+    0.5 rad, assuming it was given in [-0.5, 0.5). Full spokes reach pi and
+    are not touched, but an operator built only on points near the centre
+    (within about Matrix / (4 pi) k-grid units, for example a centre fill or a
+    probe of the first samples) would silently be evaluated at 2 pi times the
+    radius (WI-0058 run 2, BRK-0063). When the stored samples differ from
+    ``omega``, they are set again, unchanged, through
+    ``update_samples(unsafe=True)`` and the density is restored; if they still
+    differ, a ``RuntimeError`` is raised instead of returning a wrong image.
+    """
+    import warnings
+
+    omega = np.asarray(omega)
+    if not np.issubdtype(omega.dtype, np.floating):
+        omega = omega.astype(np.float64)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="Samples will be rescaled")
+        nufft_op = get_operator(operator)(omega, shape=volume_shape, density=density)
+    if not _same_samples(nufft_op, omega):
+        logger.debug(" - NUFFT samples were rescaled by the backend; setting the radians again")
+        nufft_op.update_samples(np.asarray(omega, order="F"), unsafe=True)
+        if density is not None and density is not False:
+            nufft_op.density = density
+        if not _same_samples(nufft_op, omega):
+            raise RuntimeError("NUFFT operator does not keep the trajectory coordinates")
+    return nufft_op
+
+
+def _same_samples(nufft_op, omega) -> bool:
+    samples = np.asarray(nufft_op.samples).reshape(omega.shape)
+    return bool(np.allclose(samples, omega, rtol=0.0, atol=1e-6))
 
 
 def phase_correction_factor(recon_info: Dict[str, Any], options: Options,
