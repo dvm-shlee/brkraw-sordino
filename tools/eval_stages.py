@@ -97,6 +97,7 @@ STAGES_WI0058: Tuple[Stage, ...] = (
     Stage("S4p", "integral", "integral_delay", "S4p S3 + phase delay"),
     Stage("S4", "integral_delay", "integral_delay", "S4 S3 + traj and phase delays"),
     Stage("S4z", "integral_delay", "integral_delay", "S4z S4 + estimated centre", "fill"),
+    Stage("S3z", "integral", "integral", "S3z S3 + estimated centre", "fill"),
 )
 ALL_STAGE_NAMES = STAGE_NAMES + tuple(s.name for s in STAGES_WI0058)
 
@@ -363,7 +364,7 @@ def run(cfg: StageConfig) -> Dict[str, Any]:
     h = cfg.roi_half
     sl = tuple(slice(ci - h, ci + h + 1) for ci in c)
     rep_vol = None
-    virtual = None   # WI-0058 S4z: virtual leading-sample positions, built on first use
+    virtual: Dict[str, np.ndarray] = {}   # WI-0058 S3z/S4z: virtual leading samples per trajectory model
     n_read = 0
     for v, vol in eval_ramp.iter_volumes(fid_entry, recon_info, n_vol):
         z = vol[0, :, :n_ph].astype(np.complex128)
@@ -377,10 +378,11 @@ def run(cfg: StageConfig) -> Dict[str, Any]:
                 if s.recon == "fill":
                     import eval_timing_centre
 
-                    if virtual is None:
-                        virtual = eval_timing_centre.leading_points(recon_info, d_traj, cfg.ignore_samples)
+                    if s.traj not in virtual:   # virtual samples on this stage's own trajectory model
+                        virtual[s.traj] = eval_timing_centre.leading_points(
+                            recon_info, d_traj if s.traj == "integral_delay" else 0.0, cfg.ignore_samples)
                     img = eval_timing_centre.centre_fill_reconstruct(
-                        vol[0], trajs[s.traj], vol_shape, cfg.ignore_samples, phases[s.phase], virtual,
+                        vol[0], trajs[s.traj], vol_shape, cfg.ignore_samples, phases[s.phase], virtual[s.traj],
                         n_iter=cfg.cg_iters, ext=cfg.cg_ext)
                 else:
                     img = eval_ramp.reconstruct(vol[0], trajs[s.traj], vol_shape, cfg.ignore_samples,

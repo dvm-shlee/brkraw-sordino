@@ -109,7 +109,9 @@ def test_cg_beats_adjoint_on_model_data():
 
 def test_wi0058_stages_and_config():
     assert es.STAGE_NAMES == ("S0", "S1", "S1p", "S1h", "S1hp", "S2", "S3")
-    assert es.ALL_STAGE_NAMES[-3:] == ("S4p", "S4", "S4z")
+    assert es.ALL_STAGE_NAMES[-4:] == ("S4p", "S4", "S4z", "S3z")
+    assert es.stage("S3z").recon == "fill" and es.stage("S3z").traj == "integral"
+    es.StageConfig(dataset="x", scan_id=1, out_dir="y", stages=("S3", "S3z")).check()   # no delay needed
     assert es.stage("S4z").recon == "fill" and es.stage("S4").traj == "integral_delay"
     assert es.stage("S4p").traj == "integral" and es.stage("S4p").phase == "integral_delay"
     with pytest.raises(ValueError):
