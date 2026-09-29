@@ -442,6 +442,97 @@ def run(cfg: StageConfig) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Where is the first peak? argmax of |FID| per spoke and volume
+# ---------------------------------------------------------------------------
+
+
+def argmax_pass(dataset: str, scan_id: int, out_dir: str, max_volumes: Optional[int] = None,
+                exclude: int = 10, label: str = "") -> Dict[str, Any]:
+    """Sample index of max |FID| for every spoke of every volume (channel 0).
+
+    The evaluation assumes the first peak is sample 1 (Director's model: the
+    TR delay puts the maximum at the second sample). This pass checks it:
+    saves ``argmax.npy`` [n_vol, n_pro] (int16), a histogram, the per-spoke
+    mode over steady-state volumes against the spoke direction and the size
+    of the vector step |g(i) - g(i-1)|, the per-volume fraction of spokes
+    whose maximum is not at sample 1, and a JSON summary. Observation only.
+    """
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    scan, recon_info, fid_entry, meta = eval_ramp.open_scan(dataset, scan_id)
+    n_pro = int(recon_info["NPro"])
+    n_tot = int(recon_info["NRepetitions"])
+    n_vol = n_tot if max_volumes is None else min(n_tot, max_volumes)
+    am = np.zeros((n_vol, n_pro), dtype=np.int16)
+    mag_first = np.zeros((n_vol, n_pro, 4), dtype=np.float32)   # |FID| at samples 0..3
+    n_read = 0
+    for v, vol in eval_ramp.iter_volumes(fid_entry, recon_info, n_vol):
+        mag = np.abs(vol[0])
+        am[v] = np.argmax(mag, axis=1)
+        mag_first[v] = mag[:, :4]
+        n_read = v + 1
+    am, mag_first = am[:n_read], mag_first[:n_read]
+    ex = min(exclude, max(n_read - 1, 0))
+    np.save(out / "argmax.npy", am)
+    ss = am[ex:]
+    values, counts = np.unique(ss, return_counts=True)
+    hist = {int(a): int(c) for a, c in zip(values, counts)}
+    frac_not1_per_vol = (am != 1).mean(axis=1)
+    # per-spoke mode over steady-state volumes and how often a spoke changes
+    mode = np.array([np.bincount(ss[:, i]).argmax() for i in range(n_pro)])
+    changes = (ss != mode[None, :]).mean(axis=0)
+    g = gradient_vectors(recon_info).T
+    step = np.linalg.norm(g - np.roll(g, 1, axis=0), axis=1)
+    not1 = mode != 1
+    summary = {
+        "method": meta.get("Method"), "version": eval_ramp.detect_version(meta),
+        "n_volumes_read": n_read, "n_pro": n_pro, "exclude_used": ex,
+        "histogram_steady_state": hist,
+        "fraction_argmax_is_1": float((ss == 1).mean()),
+        "fraction_not1_per_volume_median": float(np.median(frac_not1_per_vol[ex:])),
+        "fraction_not1_per_volume_max": float(frac_not1_per_vol[ex:].max()),
+        "spokes_with_mode_not_1": int(not1.sum()),
+        "spokes_changing_over_volumes_frac": float((changes > 0).mean()),
+        "mode_histogram": {int(a): int(c) for a, c in zip(*np.unique(mode, return_counts=True))},
+        "step_size_median_all": float(np.median(step)),
+        "step_size_median_mode_not_1": float(np.median(step[not1])) if not1.any() else None,
+        "direction_mean_abs_z_all": float(np.abs(g[:, 2]).mean()),
+        "direction_mean_abs_z_mode_not_1": float(np.abs(g[not1, 2]).mean()) if not1.any() else None,
+        "ratio_sample1_over_sample0_median": float(np.median(mag_first[ex:, :, 1] / np.maximum(mag_first[ex:, :, 0], 1e-30))),
+        "ratio_sample2_over_sample1_median": float(np.median(mag_first[ex:, :, 2] / np.maximum(mag_first[ex:, :, 1], 1e-30))),
+    }
+    (out / "argmax_summary.json").write_text(json.dumps(summary, indent=1, default=str))
+
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    title = f"{label or Path(dataset).name} scan {scan_id}"
+    fig, ax = plt.subplots(2, 2, figsize=(14, 9))
+    ax[0, 0].bar(list(hist), list(hist.values()))
+    ax[0, 0].set_yscale("log"); ax[0, 0].set_xlabel("argmax |FID| sample index"); ax[0, 0].set_ylabel("count (spokes x volumes)")
+    ax[0, 0].set_title(f"argmax histogram, volumes >= {ex}: sample 1 in {summary['fraction_argmax_is_1']:.4%}")
+    ax[0, 1].plot(mode, ".", ms=2, label="mode of argmax over volumes")
+    ax2 = ax[0, 1].twinx()
+    ax2.plot(step, lw=0.4, color="grey", alpha=0.6, label="|g(i) - g(i-1)|")
+    ax2.set_ylabel("vector step size")
+    ax[0, 1].set_xlabel("spoke"); ax[0, 1].set_ylabel("argmax sample (mode)")
+    ax[0, 1].set_title(f"per-spoke argmax mode ({int(not1.sum())} spokes not at sample 1) and vector step")
+    ax[0, 1].legend(loc="upper left", fontsize=7); ax2.legend(loc="upper right", fontsize=7)
+    im = ax[1, 0].imshow(am, aspect="auto", cmap="viridis", interpolation="nearest",
+                         vmin=0, vmax=max(3, int(np.percentile(am, 99.9))))
+    fig.colorbar(im, ax=ax[1, 0]); ax[1, 0].set_xlabel("spoke"); ax[1, 0].set_ylabel("volume")
+    ax[1, 0].set_title("argmax sample per spoke and volume")
+    ax[1, 1].plot(frac_not1_per_vol, lw=0.7); ax[1, 1].axvline(ex - 0.5, color="grey", ls="--", lw=0.8)
+    ax[1, 1].set_xlabel("volume"); ax[1, 1].set_ylabel("fraction of spokes with argmax != 1")
+    ax[1, 1].set_title("spokes whose maximum is not sample 1, per volume")
+    fig.suptitle(title); fig.tight_layout()
+    fig.savefig(out / "argmax_first_peak.png", dpi=110); plt.close(fig)
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Simulation with known ground truth
 # ---------------------------------------------------------------------------
 
