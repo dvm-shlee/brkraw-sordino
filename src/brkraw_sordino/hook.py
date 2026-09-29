@@ -19,6 +19,8 @@ from brkraw.apps.loader.helper import get_affine as get_affine_helper
 
 from numpy.typing import NDArray
 from .typing import Options
+from .boolopt import parse_bool
+from . import kcentre
 from .traj import get_trajectory
 from .recon import (
     build_recon_cache_path,
@@ -81,47 +83,62 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         "clear_cache",
         "split_ch",
         "as_complex",
-        "ramp_model",
-        "correct_phase",
+        "estimate_k0",
     }
     unknown_keys = sorted(set(kwargs.keys()) - known_keys)
     if unknown_keys:
-        logger.debug("Sordino hook unknown kwargs: %s", unknown_keys)
+        logger.warning(
+            "Sordino hook: ignoring unknown option(s): %s (ramp_model and correct_phase "
+            "were removed; correct_ramptime now covers both)", ", ".join(unknown_keys))
     cache_dir = _get_cache_dir(kwargs.get("cache_dir"))
     logger.debug("Cache dir: %s", cache_dir)
     offreso_freqs = kwargs.get("offreso_freqs")
     if isinstance(offreso_freqs, (int, float)):
         offreso_freqs = (offreso_freqs, )
 
+    correct_ramptime = parse_bool("correct_ramptime", kwargs.get("correct_ramptime", True))
+    estimate_k0 = parse_bool("estimate_k0", kwargs.get("estimate_k0", False))
+    if estimate_k0 and not correct_ramptime:
+        raise ValueError(
+            "estimate_k0=true needs correct_ramptime=true: the estimated centre samples "
+            "lie on the ramp-corrected trajectory")
+
     return Options(
         ext_factors=_normalize_ext_factors(kwargs.get("ext_factors")),
         ignore_samples=int(kwargs.get("ignore_samples", 1)),
         offset=int(kwargs.get("offset", 0)),
         num_frames=kwargs.get("num_frames"),
-        correct_spoketiming=bool(kwargs.get("correct_spoketiming", False)),
-        correct_ramptime=bool(kwargs.get("correct_ramptime", True)),
+        correct_spoketiming=parse_bool("correct_spoketiming", kwargs.get("correct_spoketiming", False)),
+        correct_ramptime=correct_ramptime,
         offreso_freqs=tuple(offreso_freqs) if offreso_freqs else (),
         mem_limit=float(kwargs.get("mem_limit", 0.5)),
-        clear_cache=bool(kwargs.get("clear_cache", True)),
-        split_ch=bool(kwargs.get("split_ch", False)),
+        clear_cache=parse_bool("clear_cache", kwargs.get("clear_cache", True)),
+        split_ch=parse_bool("split_ch", kwargs.get("split_ch", False)),
         cache_dir=cache_dir,
-        as_complex=bool(kwargs.get("as_complex", False)),
-        ramp_model=_ramp_model(kwargs.get("ramp_model", "integral")),
-        correct_phase=_to_bool(kwargs.get("correct_phase", True)),
+        as_complex=parse_bool("as_complex", kwargs.get("as_complex", False)),
+        estimate_k0=estimate_k0,
     )
 
 
-def _ramp_model(value: Any) -> str:
-    model = str(value).strip().lower()
-    if model not in ("integral", "legacy"):
-        raise ValueError("ramp_model must be 'integral' or 'legacy'")
-    return model
+def _resolve_k0(options: Options, recon_info: Dict[str, Any]) -> Options:
+    """``estimate_k0`` applies to SORDINO v1-v3 only (BRK-0066).
 
+    A general ZTE keeps the plain adjoint: the option is switched off in the
+    options (so the cache key equals the plain run) and an info line says so.
+    """
+    if not options.estimate_k0:
+        return options
+    from . import timing as timing_mod
 
-def _to_bool(value: Any) -> bool:
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
+    try:
+        version = timing_mod.read_timing(recon_info).version
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"estimate_k0 needs the sequence timing parameters: {exc}") from exc
+    if version == "zte":
+        logger.info("estimate_k0 applies to SORDINO v1-v3 only; general ZTE data are reconstructed "
+                    "without it.")
+        options.estimate_k0 = False
+    return options
 
 
 def _parse_recon_info(scan):
@@ -139,9 +156,12 @@ def _recon_metadata(recon_info: Dict[str, Any], options: Options) -> Dict[str, A
     """Facts about the reconstruction kept with the result (BRK-0060).
 
     ``kspace_gap`` is ``timing.kspace_gap`` (radius of the unsampled k-space
-    centre in k-grid units, the centre is never filled), or None when the
-    timing values are not available. Stored on the scan as
-    ``scan._sordino_recon_meta`` and in the recon cache ``.json``.
+    centre in k-grid units; ``centre_filled`` is true only with
+    ``estimate_k0``), or None when the timing values are not available.
+    ``k0`` is added after the reconstruction with ``estimate_k0``: for every
+    frame a list of ``[real, imag]``, one per channel (None otherwise).
+    Stored on the scan as ``scan._sordino_recon_meta`` and in the recon cache
+    ``.json``.
     """
     from . import timing as timing_mod
 
@@ -149,10 +169,11 @@ def _recon_metadata(recon_info: Dict[str, Any], options: Options) -> Dict[str, A
         seq = timing_mod.read_timing(recon_info)
     except (KeyError, TypeError, ValueError) as exc:
         logger.debug("No k-space gap metadata: %s", exc)
-        return {"kspace_gap": None}
+        return {"kspace_gap": None, "k0": None}
     gap = timing_mod.kspace_gap(seq, float(recon_info["OverSampling"]),
                                 getattr(options, "ignore_samples", None) or 1)
-    return {"kspace_gap": gap}
+    gap["centre_filled"] = bool(getattr(options, "estimate_k0", False))
+    return {"kspace_gap": gap, "k0": None}
 
 
 def _get_fid_identity(fid_entry: FileIO) -> str:
@@ -235,11 +256,12 @@ def get_dataobj(
     ) -> Optional[Union[np.ndarray, Tuple[np.ndarray, ...]]]:
     
     options = _build_options(kwargs)
-    logger.debug("Sordino options correct_spoketiming=%s", options.correct_spoketiming)
-    setattr(scan, "_sordino_options", options)
     cache_files: list[str] = []
     setattr(scan, "_sordino_cache_files", cache_files)
     recon_info = _parse_recon_info(scan)
+    options = _resolve_k0(options, recon_info)
+    logger.debug("Sordino options correct_spoketiming=%s", options.correct_spoketiming)
+    setattr(scan, "_sordino_options", options)
     try:
         spatial_shape = tuple(parse_volume_shape(recon_info, options))
         setattr(scan, "_sordino_spatial_shape", spatial_shape)
@@ -258,6 +280,8 @@ def get_dataobj(
         try:
             cached_dtype = np.dtype(img_meta.get("dtype"))
             cached_shape = img_meta.get("shape")
+            if options.estimate_k0:
+                recon_meta["k0"] = img_meta.get("k0")
             if cached_shape:
                 expected_size = int(np.prod(cached_shape) * cached_dtype.itemsize)
                 if not _is_cache_valid(img_cache_path, expected_size=expected_size):
@@ -272,6 +296,12 @@ def get_dataobj(
             traj = get_trajectory(recon_info, options)
             phase_factor = phase_correction_factor(
                 recon_info, options, int(parse_fid_info(recon_info)[0][1]))
+            virtual_traj = None
+            k0_frames: list = []
+            if options.estimate_k0:
+                virtual_traj = kcentre.leading_points(recon_info, options.ignore_samples or 1)
+                logger.info("Estimating the k-space centre (%s virtual sample(s) per spoke).",
+                            virtual_traj.shape[1])
             img_temp_path = img_cache_path.with_suffix(img_cache_path.suffix + ".partial")
             if img_temp_path.exists():
                 try:
@@ -331,12 +361,17 @@ def get_dataobj(
                             override_buffer_size=stc_param['buffer_size'],
                             override_dtype=stc_param['dtype'],
                             phase_factor=phase_factor,
+                            virtual_traj=virtual_traj,
+                            k0_out=k0_frames,
                         )
                 else:
                     logger.debug("Spoketiming correction disabled.")
                     dtype = recon_dataobj(fid_fobj, traj, recon_info, img_fobj, options,
-                                          phase_factor=phase_factor)
+                                          phase_factor=phase_factor,
+                                          virtual_traj=virtual_traj, k0_out=k0_frames)
             os.replace(img_temp_path, img_cache_path)
+        if options.estimate_k0:
+            recon_meta["k0"] = [[[float(k.real), float(k.imag)] for k in frame] for frame in k0_frames]
         dataobj_shape = list(get_dataobj_shape(recon_info, options))
         cached_dtype = np.dtype(dtype)
         cached_shape = list(dataobj_shape)
@@ -346,6 +381,7 @@ def get_dataobj(
                 "dtype": cached_dtype.str,
                 "shape": list(cached_shape),
                 "kspace_gap": recon_meta["kspace_gap"],
+                "k0": recon_meta["k0"],
             },
         )
     else:

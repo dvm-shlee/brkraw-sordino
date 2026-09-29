@@ -93,7 +93,7 @@ def test_constant_gradient_equals_correct_ramptime_off():
     info = _info("zte")
     traj, seq = _traj(info)
     off = seq.acq_delay_total_us / seq.dwell_us
-    ref = calc_radial_traj3d(_grad(info), MATRIX, False, OS, correct_ramptime=False, traj_offset=off)
+    ref = calc_radial_traj3d(_grad(info), MATRIX, OS, off)
     np.testing.assert_allclose(traj, ref, atol=1e-12)
 
 
@@ -139,24 +139,25 @@ def test_v2_v3_are_one_model_driven_by_ramp_vs_acquisition():
     assert 0.4 < f_last < 0.6                               # ends midway, target not reached
 
 
-def test_legacy_option_reproduces_previous_trajectory(tmp_path):
+def test_correct_ramptime_switch_selects_integral_or_fixed_vector(tmp_path):
     info = _info("v2")
-    options = _build_options({"cache_dir": str(tmp_path), "ramp_model": "legacy"})
-    traj = get_trajectory(info, options)
     off = info["AcqDelayTotal_us"] * 1e-6 * info["EffBandwidth_Hz"] * OS
-    ref = calc_radial_traj3d(_grad(info), MATRIX, False, OS, correct_ramptime=True, traj_offset=off)
-    np.testing.assert_array_equal(traj, ref)
-    integral = get_trajectory(info, _build_options({"cache_dir": str(tmp_path)}))
-    assert not np.allclose(integral, ref)                    # different cache entry and values
+    fixed = get_trajectory(info, _build_options({"cache_dir": str(tmp_path), "correct_ramptime": "False"}))
+    ref = calc_radial_traj3d(_grad(info), MATRIX, OS, off)
+    np.testing.assert_array_equal(fixed, ref)                # one fixed vector per spoke
+    unit = 1.0 / (N - 1) / 2.0
+    g = _grad(info)
+    np.testing.assert_allclose(fixed[3, 4], unit * (4 + off) * g[:, 3], atol=1e-15)
+    on = get_trajectory(info, _build_options({"cache_dir": str(tmp_path)}))
+    np.testing.assert_array_equal(on, _traj(info)[0])        # default: integral trajectory
+    assert not np.allclose(on, fixed)                        # different cache entry and values
 
 
 def test_phase_factor():
     info = _info("v2")
 
     class O:  # minimal options
-        correct_phase = True
         correct_ramptime = True
-        ramp_model = "integral"
     assert phase_correction_factor(info, O, N) is None       # O1 list of length 1
     g = _grad(info)
     o1 = (1000.0 * g[0] - 500.0 * g[1] + 250.0 * g[2]).tolist()
@@ -168,17 +169,8 @@ def test_phase_factor():
     d = np.roll(np.asarray(o1), 1) - np.asarray(o1)
     np.testing.assert_allclose(np.angle(p[5, 3]),
                                np.angle(np.exp(-2j * np.pi * d[5] * tau[3] * 1e-6)), atol=1e-5)
-    O.ramp_model = "legacy"
+    O.correct_ramptime = False                               # the phase belongs to correct_ramptime
     assert phase_correction_factor(info, O, N) is None
-    O.ramp_model, O.correct_phase = "integral", False
-    assert phase_correction_factor(info, O, N) is None
-
-
-def test_ramp_model_option_validation(tmp_path):
-    with pytest.raises(ValueError):
-        _build_options({"cache_dir": str(tmp_path), "ramp_model": "quadratic"})
-    o = _build_options({"cache_dir": str(tmp_path), "correct_phase": "false"})
-    assert o.correct_phase is False and o.ramp_model == "integral"
 
 
 def _zte_info():
@@ -235,4 +227,4 @@ def test_recon_metadata_records_gap(tmp_path):
     assert gap["ignore_samples"] == 2
     assert gap["gap_used_kgrid"] == pytest.approx((6.2 + 2 * 0.625) / 0.625 / 4)
     del info["AcqDelayTotal_us"]
-    assert _recon_metadata(info, _build_options({"cache_dir": str(tmp_path)})) == {"kspace_gap": None}
+    assert _recon_metadata(info, _build_options({"cache_dir": str(tmp_path)})) == {"kspace_gap": None, "k0": None}

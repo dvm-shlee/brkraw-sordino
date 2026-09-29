@@ -72,52 +72,31 @@ def find_undersamp(matrix_size: int, n_pro_target: int) -> float:
 def calc_radial_traj3d(
     grad_array: np.ndarray,
     matrix_size: int,
-    use_origin: bool,
     over_sampling: float,
-    correct_ramptime: bool = False,
     traj_offset: Optional[float] = None,
 ) -> np.ndarray:
-    """
-    Calculate trajectory for SORDINO imaging.
-    For each projection, a vector with sampling positions (trajectory) is created.
+    """Trajectory with one fixed gradient vector per projection (no ramp model).
+
+    Used by ``correct_ramptime=false`` (every sample of a spoke lies on that
+    spoke's target vector, sample j at ``(j + traj_offset) / (2 (N - 1))``).
+    The ramp-corrected trajectory is ``calc_radial_traj3d_integral``; the
+    earlier curved form was moved to ``tools/legacytraj.py`` (BRK-0066).
 
     Args:
         grad_array (ndarray): Gradient vector profile for each projection, sized (3 x n_pro).
         matrix_size (int): Matrix size of the final image.
         over_sampling (float): Oversampling factor.
-        bandwidth (float): Bandwidth of the imaging process.
-        traj_offset (float, optional): Trajectory offset ratio compared to ADC sampling.
+        traj_offset (float, optional): Trajectory offset in samples (acquisition delay).
 
     Returns:
-        ndarray: Calculated trajectory for each projection.
+        ndarray: (n_pro, N, 3) trajectory.
     """
-    pro_offset = 1 if use_origin else 0
-    g = grad_array.copy()
-    npro = g.shape[-1]
-    traj_offset = traj_offset or 0
+    g = np.asarray(grad_array, dtype=float)
     num_samples = int(matrix_size / 2 * over_sampling)
-    traj = np.zeros([npro, num_samples, 3])
-    scale_factor = (num_samples - 1 + traj_offset) / (num_samples-1)
-
-    logger.debug('++ Processing trajectory calculation...')
-    logger.debug(' + Input arguments')
-    logger.debug(f' - Size of Matrix: {matrix_size}')
-    logger.debug(f' - OverSampling: {over_sampling}')
-    logger.debug(f' - Trajectory offset ratio: {traj_offset}')
-    logger.debug(f' - Ramp-time Correction: {str(correct_ramptime)}')
-    logger.debug(f' - Size of Output Trajectory: {traj.shape}')
-    logger.debug(f' - Image Scailing Factor (*Subject to be corrected in future version): {scale_factor}')
-
-    for i_pro in progressbar(range(pro_offset, npro + pro_offset), desc="traj", ncols=100):
-        for i_samp in range(num_samples):
-            samp = ((i_samp + traj_offset) / (num_samples - 1)) / 2
-            if not correct_ramptime or i_pro == (npro + pro_offset) - 1:
-                correction = np.zeros(3)
-                traj[i_pro, i_samp, :] = samp * (g[:, i_pro] + correction)
-            else:
-                correction = (g[:, i_pro] - g[:, i_pro - 1]) / num_samples * i_samp
-                traj[i_pro, i_samp, :] = samp * (g[:, i_pro - 1] + correction)
-    return traj
+    off = traj_offset or 0
+    samp = ((np.arange(num_samples, dtype=float) + off) / (num_samples - 1)) / 2.0
+    logger.debug(" - Fixed-vector trajectory: (%s, %s, 3)", g.shape[-1], num_samples)
+    return samp[None, :, None] * g.T[:, None, :]
 
 
 def calc_radial_traj3d_integral(
@@ -136,7 +115,8 @@ def calc_radial_traj3d_integral(
 
     with t_j and F_j (integral of the ramp fraction) in samples, and
     unit = 1 / (2 (N - 1)) the same radius scale as calc_radial_traj3d, so a
-    constant gradient gives the same trajectory as ``correct_ramptime=False``.
+    constant gradient gives the same trajectory as ``calc_radial_traj3d``
+    (the fixed vector).
     g(-1) is the last vector of the list (the dummy spokes and the previous
     frame end on it). Every projection gets the ramp, the last one included.
 
@@ -303,10 +283,7 @@ def generate_hash(*args: Any) -> str:
 def get_trajectory(recon_info: Dict[str, Any], 
                    options: Options) -> np.ndarray:
     
-    correct_ramptime = getattr(options, "correct_ramptime", True)
-    ramp_model = getattr(options, "ramp_model", "integral")
-    if ramp_model not in ("integral", "legacy"):
-        raise ValueError(f"ramp_model must be 'integral' or 'legacy', not {ramp_model!r}")
+    correct_ramptime = bool(getattr(options, "correct_ramptime", True))
     ext_factors = getattr(options, "ext_factors", [1.0, 1.0, 1.0])
     logger.debug(f' + Extension factors applied to matrix: {ext_factors}')
 
@@ -327,7 +304,7 @@ def get_trajectory(recon_info: Dict[str, Any],
                               reorder)
     offset_factor = traj_offset * (10 ** -6) * eff_bandwidth * over_sampling
 
-    use_integral = correct_ramptime and ramp_model == "integral"
+    use_integral = correct_ramptime
     timing_desc = None
     if use_integral:
         from . import timing as timing_mod
@@ -365,7 +342,7 @@ def get_trajectory(recon_info: Dict[str, Any],
         correct_ramptime,
     )
     if correct_ramptime:
-        option_for_hash = option_for_hash + (ramp_model, repr(timing_desc))
+        option_for_hash = option_for_hash + ("integral", repr(timing_desc))
 
     digest = generate_hash(*option_for_hash)
     traj_path = options.cache_dir / f"{digest}.npy"
@@ -378,14 +355,7 @@ def get_trajectory(recon_info: Dict[str, Any],
             traj = calc_radial_traj3d_integral(
                 grad, sample_size, over_sampling, times_us, f_us, seq.dwell_us)
         else:
-            traj = calc_radial_traj3d(
-                grad,
-                sample_size,
-                use_origin,
-                over_sampling,
-                correct_ramptime=correct_ramptime,
-                traj_offset=offset_factor,
-            )
+            traj = calc_radial_traj3d(grad, sample_size, over_sampling, offset_factor)
         np.save(traj_path, traj)
         logger.debug("Saved trajectory cache: %s", traj_path)
     return traj

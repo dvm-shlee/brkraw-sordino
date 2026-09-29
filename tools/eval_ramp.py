@@ -194,26 +194,29 @@ def reconstruct(kspace_pro_pts: np.ndarray, traj: np.ndarray,
 
 
 TRAJ_MODES = ("off", "pre", "post_traj", "post")
-"""Reconstruction variants compared in (c), all through brkraw-sordino.
+"""Reconstruction variants compared in (c).
 
-off:        correct_ramptime=False (constant vector per spoke).
-pre:        ramp_model="legacy", correct_phase=False: the code before WI-0056
-            (brkraw-sordino bf4447b), k_j = s_j (g_prev + (g_cur - g_prev) j/N).
-post_traj:  ramp_model="integral", correct_phase=False: integral trajectory
-            only (BRK-0056), to separate its effect from the phase correction.
-post:       ramp_model="integral", correct_phase=True: the new default.
+off:        product with correct_ramptime=False (constant vector per spoke).
+pre:        the legacy trajectory of the code before WI-0056 (brkraw-sordino
+            bf4447b), k_j = s_j (g_prev + (g_cur - g_prev) j/N), from
+            ``legacytraj`` (moved out of ``src/``, BRK-0066); no phase correction.
+post_traj:  the product's integral trajectory only (BRK-0056), to separate its
+            effect from the phase correction: no phase factor.
+post:       the product's correct_ramptime=True: integral trajectory and phase
+            correction (the default).
 """
 
 _MODE_OPTIONS = {
-    "off": {"correct_ramptime": False, "correct_phase": False},
-    "pre": {"ramp_model": "legacy", "correct_phase": False},
-    "post_traj": {"ramp_model": "integral", "correct_phase": False},
-    "post": {"ramp_model": "integral", "correct_phase": True},
+    "off": {"correct_ramptime": False},
+    "pre": {"correct_ramptime": True},
+    "post_traj": {"correct_ramptime": True},
+    "post": {"correct_ramptime": True},
 }
 
 
 def mode_options(mode: str, cache_dir: Path):
-    """brkraw-sordino Options for one of ``TRAJ_MODES``."""
+    """brkraw-sordino Options for one of ``TRAJ_MODES`` (``pre`` and
+    ``post_traj`` differ from the product only in what ``trajectory`` does)."""
     from brkraw_sordino.hook import _build_options
 
     if mode not in TRAJ_MODES:
@@ -227,9 +230,16 @@ def trajectory(recon_info: Dict[str, Any], mode: str, cache_dir: Path):
     from brkraw_sordino.traj import get_trajectory
 
     options = mode_options(mode, cache_dir)
+    if mode == "pre":
+        try:
+            import legacytraj
+        except ImportError:  # pragma: no cover - run from another folder
+            from tools import legacytraj  # type: ignore
+        return legacytraj.legacy_from_recon_info(recon_info), None
     traj = get_trajectory(recon_info, options)
-    phase = phase_correction_factor(recon_info, options, int(traj.shape[1]))
-    return traj, phase
+    if mode in ("off", "post_traj"):
+        return traj, None
+    return traj, phase_correction_factor(recon_info, options, int(traj.shape[1]))
 
 
 # ---------------------------------------------------------------------------

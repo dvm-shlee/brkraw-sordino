@@ -5,12 +5,12 @@ stages side by side, so that a change can be read stage by stage:
 
     stage   trajectory model            FID phase          product options
     S0      no ramp (constant vector)   none               correct_ramptime=False
-    S1      legacy (curvature x2)       none               ramp_model="legacy"
+    S1      legacy (curvature x2)       none               (tool only, tools/legacytraj.py)
     S1+p    legacy                      implied by S1      (tool only)
     S1h     legacy, curvature halved    none               (tool only)
     S1h+p   legacy halved               implied by S1h     (tool only)
-    S2      gradient integral           none               ramp_model="integral", correct_phase=False
-    S3      gradient integral           integral model     ramp_model="integral", correct_phase=True
+    S2      gradient integral           none               (tool only: trajectory of correct_ramptime=True, no phase)
+    S3      gradient integral           integral model     correct_ramptime=True (default)
 
 One model G(t) defines both the trajectory and the phase of a stage: with
 k(t) = c * integral(G) and the receiver frequency set for the target vector

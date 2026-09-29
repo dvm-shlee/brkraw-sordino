@@ -199,18 +199,14 @@ def phase_correction_factor(recon_info: Dict[str, Any], options: Options,
     the FOV offset collect phi_ij = 2*pi*(O1[i-1] - O1[i]) * tau_j, with
     tau_j the integral of (1 - ramp fraction) from the phase reference (RF
     centre) to sample j (timing.ramp_terms). Returns exp(-1j*phi) with shape
-    (n_pro, n_points), or None when no correction applies: option off, ramp
-    model not "integral", correct_ramptime off, no FOV offset (O1 list of
-    length 1), or a constant gradient (general ZTE).
+    (n_pro, n_points), or None when no correction applies: correct_ramptime
+    off, no FOV offset (O1 list of length 1), or a constant gradient (general
+    ZTE). The phase correction is part of ``correct_ramptime`` (BRK-0066).
     The sign follows the phase observed on v2 data (WI-0056 run 3).
     """
     from . import timing as timing_mod
 
-    if not getattr(options, "correct_phase", True):
-        return None
     if not getattr(options, "correct_ramptime", True):
-        return None
-    if getattr(options, "ramp_model", "integral") != "integral":
         return None
     o1 = np.asarray(recon_info.get("O1List_Hz") or [], dtype=float)
     n_pro = int(recon_info.get("NPro") or 0)
@@ -250,7 +246,9 @@ def recon_dataobj(fid_fobj,
                   options: Options,
                   override_buffer_size=None,
                   override_dtype=None,
-                  phase_factor=None):
+                  phase_factor=None,
+                  virtual_traj=None,
+                  k0_out=None):
     """Reconstruct image volumes from FID data and write to an output file.
 
     Args:
@@ -263,6 +261,12 @@ def recon_dataobj(fid_fobj,
         override_dtype (Optional[np.dtype]): Override FID dtype.
         phase_factor (Optional[np.ndarray]): (n_pro, n_points) factor from
             ``phase_correction_factor``, applied to every frame and channel.
+        virtual_traj (Optional[np.ndarray]): (n_pro, M, 3) leading positions
+            from ``kcentre.leading_points``; when given (``estimate_k0``), the
+            centre is estimated and filled for every frame and channel
+            (``kcentre.fill_centre``) instead of the plain adjoint.
+        k0_out (Optional[list]): with ``virtual_traj``, one list per frame is
+            appended, holding the estimated K0 (complex) of each channel.
 
     Returns:
         np.dtype: Dtype of the reconstructed output volumes.
@@ -294,7 +298,18 @@ def recon_dataobj(fid_fobj,
     eff_bandwidth = recon_info.get("EffBandwidth_Hz")
     over_sampling = recon_info.get("OverSampling")
 
+    if virtual_traj is not None:
+        from .kcentre import fill_centre
+
+    def _image(k, frame, frame_k0):
+        if virtual_traj is None:
+            return nufft_adjoint(k, trimmed_traj, volume_shape, frame)
+        img, info = fill_centre(k, trimmed_traj, virtual_traj, volume_shape)
+        frame_k0.append(info["k0"])
+        return img
+
     for n in progressbar(range(num_frames), desc='frames', ncols=100):
+        frame_k0: list = []
         buffer = fid_fobj.read(buffer_size)
         vol = np.frombuffer(buffer, dtype=fid_dtype).reshape(fid_shape, order='F')
         vol = (vol[0] + 1j * vol[1])[np.newaxis, ...]
@@ -343,7 +358,7 @@ def recon_dataobj(fid_fobj,
                         eff_bandwidth=eff_bandwidth,
                         over_sampling=over_sampling,
                     )
-                _vol = nufft_adjoint(_k_space, trimmed_traj, volume_shape, n)
+                _vol = _image(_k_space, n, frame_k0)
                 recon_vol.append(_vol)
             recon_vol = np.stack(recon_vol, axis=0)
         else:
@@ -367,7 +382,9 @@ def recon_dataobj(fid_fobj,
                     eff_bandwidth=eff_bandwidth,
                     over_sampling=over_sampling,
                 )
-            recon_vol = nufft_adjoint(k_space, trimmed_traj, volume_shape, n)
+            recon_vol = _image(k_space, n, frame_k0)
+        if k0_out is not None and virtual_traj is not None:
+            k0_out.append(frame_k0)
         if n == 0:
             dtype = recon_vol.dtype
         img_fobj.write(recon_vol.T.flatten(order="C").tobytes())

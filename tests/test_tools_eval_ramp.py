@@ -8,6 +8,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import eval_ramp as er  # noqa: E402
+import legacytraj  # noqa: E402
 from brkraw_sordino import traj as product_traj  # noqa: E402
 
 
@@ -24,11 +25,10 @@ def _recon_info(matrix=16, os_=2.0):
 
 
 def test_mode_options_map_to_product_settings(tmp_path):
-    for mode, (ramp_ok, model, phase) in {
-            "off": (False, "integral", False), "pre": (True, "legacy", False),
-            "post_traj": (True, "integral", False), "post": (True, "integral", True)}.items():
+    for mode, ramp_ok in {"off": False, "pre": True, "post_traj": True, "post": True}.items():
         o = er.mode_options(mode, tmp_path)
-        assert (o.correct_ramptime, o.ramp_model, o.correct_phase) == (ramp_ok, model, phase)
+        assert o.correct_ramptime is ramp_ok
+        assert not hasattr(o, "ramp_model") and not hasattr(o, "correct_phase")
     with pytest.raises(ValueError):
         er.mode_options("code", tmp_path)
 
@@ -38,13 +38,27 @@ def test_pre_mode_is_the_previous_trajectory(tmp_path):
     matrix, npro, os_ = 16, info["NPro"], info["OverSampling"]
     g = product_traj.calc_radial_grad3d(matrix, npro, False, False, False)
     off = 6.75e-6 * 75000.0 * os_
-    ref = product_traj.calc_radial_traj3d(g, matrix, False, os_, True, off)
+    ref = legacytraj.calc_radial_traj3d_legacy(g, matrix, os_, off)
     traj, phase = er.trajectory(info, "pre", tmp_path)
     np.testing.assert_array_equal(traj, ref)
     assert phase is None
     post, post_phase = er.trajectory(info, "post", tmp_path)
     assert post.shape == ref.shape and not np.allclose(post, ref)
     assert post_phase is None          # O1 list of length 1: no FOV offset
+    off_traj, off_phase = er.trajectory(info, "off", tmp_path)
+    np.testing.assert_array_equal(off_traj, product_traj.calc_radial_traj3d(g, matrix, os_, off))
+    assert off_phase is None
+
+
+def test_post_traj_has_no_phase_factor_but_post_has(tmp_path):
+    info = _recon_info()
+    g = product_traj.calc_radial_grad3d(16, info["NPro"], False, False, False)
+    info["O1List_Hz"] = (1000.0 * g[0] - 500.0 * g[1] + 250.0 * g[2]).tolist()
+    info["TrigSegmentMode"] = "Off"
+    t_traj, p_traj = er.trajectory(info, "post_traj", tmp_path)
+    t_post, p_post = er.trajectory(info, "post", tmp_path)
+    np.testing.assert_array_equal(t_traj, t_post)
+    assert p_traj is None and p_post is not None and p_post.shape[0] == info["NPro"]
 
 
 def test_detect_version():

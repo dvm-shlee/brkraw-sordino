@@ -55,6 +55,12 @@ S4z — estimated k-space centre (dead-time gap)
     slowly at high k on real data (blurred after 10 iterations), while the
     centre values converge in a few iterations.
 
+S3z (S3 plus the estimated centre, 1x grid) is also the product option
+``estimate_k0`` (``src/brkraw_sordino/kcentre.py``, BRK-0066). The two
+implementations are kept apart on purpose and ``tests/test_kcentre.py`` checks
+that they agree (relative difference below 1e-6); this tool keeps the wider
+settings (2x grid, delays, weights) used by S4z.
+
 This file is a development tool: it is not part of the installed package.
 """
 
