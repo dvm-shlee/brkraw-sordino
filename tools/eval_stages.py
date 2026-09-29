@@ -64,8 +64,10 @@ except ImportError:  # pragma: no cover - run from another folder
 # Stage definitions
 # ---------------------------------------------------------------------------
 
-TRAJ_MODELS = ("off", "legacy", "legacy_half", "integral")
+TRAJ_MODELS = ("off", "legacy", "legacy_half", "integral", "integral_delay")
 PHASE_MODELS = ("none", "legacy", "legacy_half", "integral")
+#: WI-0058: the integral phase with the self-calibrated sample-time shift.
+DELAY_PHASE_MODELS = ("integral_delay",)
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,7 @@ class Stage:
     traj: str
     phase: str
     label: str
+    recon: str = "adjoint"   # "adjoint" (product) or "fill" (WI-0058 S4z: adjoint + estimated centre)
 
 
 STAGES: Tuple[Stage, ...] = (
@@ -87,12 +90,22 @@ STAGES: Tuple[Stage, ...] = (
 )
 STAGE_NAMES = tuple(s.name for s in STAGES)
 
+#: WI-0058 stages (tool only; ``eval_timing_centre``). They need
+#: ``StageConfig.delay_traj_us`` / ``delay_phase_us`` (the per-scan estimates
+#: of ``eval_timing_centre.delay_pass``).
+STAGES_WI0058: Tuple[Stage, ...] = (
+    Stage("S4p", "integral", "integral_delay", "S4p S3 + phase delay"),
+    Stage("S4", "integral_delay", "integral_delay", "S4 S3 + traj and phase delays"),
+    Stage("S4z", "integral_delay", "integral_delay", "S4z S4 + estimated centre", "fill"),
+)
+ALL_STAGE_NAMES = STAGE_NAMES + tuple(s.name for s in STAGES_WI0058)
+
 
 def stage(name: str) -> Stage:
-    for s in STAGES:
+    for s in STAGES + STAGES_WI0058:
         if s.name == name:
             return s
-    raise ValueError(f"unknown stage {name!r}; known: {STAGE_NAMES}")
+    raise ValueError(f"unknown stage {name!r}; known: {ALL_STAGE_NAMES}")
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +155,14 @@ def legacy_trajectory(recon_info: Dict[str, Any], curvature: float = 1.0) -> np.
     return traj
 
 
-def stage_trajectory(recon_info: Dict[str, Any], traj_model: str, cache_dir: Path) -> np.ndarray:
-    """(n_pro, N, 3) trajectory of one ``TRAJ_MODELS`` entry."""
+def stage_trajectory(recon_info: Dict[str, Any], traj_model: str, cache_dir: Path,
+                     delay_us: float = 0.0) -> np.ndarray:
+    """(n_pro, N, 3) trajectory of one ``TRAJ_MODELS`` entry (``delay_us``
+    is used by ``integral_delay`` only)."""
+    if traj_model == "integral_delay":
+        import eval_timing_centre
+
+        return eval_timing_centre.delayed_trajectory(recon_info, delay_us)
     if traj_model == "off":
         return eval_ramp.trajectory(recon_info, "off", cache_dir)[0]
     if traj_model == "legacy":
@@ -179,16 +198,21 @@ def implied_tau_us(recon_info: Dict[str, Any], phase_model: str, n_points: int) 
 
 
 def stage_phase_factor(recon_info: Dict[str, Any], phase_model: str, n_points: int,
-                       cache_dir: Path) -> Optional[np.ndarray]:
+                       cache_dir: Path, delay_us: float = 0.0) -> Optional[np.ndarray]:
     """(n_pro, n_points) complex factor exp(-i phi) of one ``PHASE_MODELS`` entry.
 
     ``integral`` is taken from the product (``recon.phase_correction_factor``);
     ``legacy``/``legacy_half`` are built here from ``implied_tau_us`` with the
     same O1 step d_i = O1[i-1] - O1[i] and sign; the last projection has no
-    ramp in the legacy model, so its factor is 1.
+    ramp in the legacy model, so its factor is 1. ``integral_delay`` (WI-0058)
+    is the integral model with the sample times shifted by ``delay_us``.
     """
     if phase_model == "none":
         return None
+    if phase_model == "integral_delay":
+        import eval_timing_centre
+
+        return eval_timing_centre.delayed_phase_factor(recon_info, delay_us, n_points)
     if phase_model == "integral":
         from brkraw_sordino.recon import phase_correction_factor
 
@@ -250,6 +274,10 @@ class StageConfig:
     phase_samples: int = 32
     cache_dir: Optional[str] = None
     label: str = ""
+    delay_traj_us: Optional[float] = None   # WI-0058: sample-time shift seen by the trajectory (S4, S4z)
+    delay_phase_us: Optional[float] = None  # WI-0058: shift seen by the O1-step phase (S4p, S4, S4z)
+    cg_iters: int = 10                 # WI-0058: conjugate-gradient iterations of S4z
+    cg_ext: int = 2                    # WI-0058: S4z grid covers cg_ext x the FOV (central FOV kept)
 
     def check(self) -> None:
         if self.exclude < 0 or self.recon_count < 0 or self.roi_half < 0:
@@ -257,7 +285,13 @@ class StageConfig:
         if not 0 <= self.sample_index < self.phase_samples:
             raise ValueError("sample_index must be in [0, phase_samples)")
         for s in self.stages:
-            stage(s)
+            st = stage(s)
+            if "delay" in st.traj and self.delay_traj_us is None:
+                raise ValueError(f"stage {s} needs delay_traj_us (eval_timing_centre.delay_pass)")
+            if "delay" in st.phase and self.delay_phase_us is None:
+                raise ValueError(f"stage {s} needs delay_phase_us (eval_timing_centre.delay_pass)")
+        if self.cg_iters < 0:
+            raise ValueError("cg_iters must be >= 0")
 
 
 def _coherence(z: np.ndarray) -> np.ndarray:
@@ -300,9 +334,12 @@ def run(cfg: StageConfig) -> Dict[str, Any]:
     vol_shape = parse_volume_shape(recon_info, _Opt())
     stages_run = [stage(s) for s in cfg.stages]
     traj_models = sorted({s.traj for s in stages_run}, key=TRAJ_MODELS.index)
-    phase_models_all = [p for p in PHASE_MODELS if p != "none"]  # always measured in (a)
-    trajs = {m: stage_trajectory(recon_info, m, cache_dir) for m in traj_models}
-    phases = {p: stage_phase_factor(recon_info, p, n_pts, cache_dir) for p in phase_models_all}
+    d_traj = 0.0 if cfg.delay_traj_us is None else float(cfg.delay_traj_us)
+    d_phase = 0.0 if cfg.delay_phase_us is None else float(cfg.delay_phase_us)
+    phase_list = PHASE_MODELS + (DELAY_PHASE_MODELS if cfg.delay_phase_us is not None else ())
+    phase_models_all = [p for p in phase_list if p != "none"]  # always measured in (a)
+    trajs = {m: stage_trajectory(recon_info, m, cache_dir, d_traj) for m in traj_models}
+    phases = {p: stage_phase_factor(recon_info, p, n_pts, cache_dir, d_phase) for p in phase_models_all}
     phases["none"] = None
     have_phase = all(phases[p] is not None for p in phase_models_all)
 
@@ -318,32 +355,42 @@ def run(cfg: StageConfig) -> Dict[str, Any]:
     rs = cfg.exclude if cfg.recon_start is None else cfg.recon_start
     recon_ids = set(range(rs, min(n_vol, rs + cfg.recon_count)))
     first_peak = np.zeros((n_vol, n_pro), dtype=np.complex64)
-    coh = {p: np.zeros((n_vol, n_ph)) for p in PHASE_MODELS}
-    cstd = {p: np.zeros((n_vol, n_ph)) for p in PHASE_MODELS}
+    coh = {p: np.zeros((n_vol, n_ph)) for p in phase_list}
+    cstd = {p: np.zeros((n_vol, n_ph)) for p in phase_list}
     roi = {s.name: [] for s in stages_run}
     mean_img = {s.name: None for s in stages_run}
     c = [x // 2 for x in vol_shape]
     h = cfg.roi_half
     sl = tuple(slice(ci - h, ci + h + 1) for ci in c)
     rep_vol = None
+    virtual = None   # WI-0058 S4z: virtual leading-sample positions, built on first use
     n_read = 0
     for v, vol in eval_ramp.iter_volumes(fid_entry, recon_info, n_vol):
         z = vol[0, :, :n_ph].astype(np.complex128)
         first_peak[v] = vol[0, :, cfg.sample_index]
-        for p in PHASE_MODELS:
+        for p in phase_list:
             zp = z if phases[p] is None else z * phases[p][:, :n_ph]
             coh[p][v] = _coherence(zp)
             cstd[p][v] = _circular_std(zp)
         if v in recon_ids:
             for s in stages_run:
-                img = eval_ramp.reconstruct(vol[0], trajs[s.traj], vol_shape, cfg.ignore_samples,
-                                            phases[s.phase])
+                if s.recon == "fill":
+                    import eval_timing_centre
+
+                    if virtual is None:
+                        virtual = eval_timing_centre.leading_points(recon_info, d_traj, cfg.ignore_samples)
+                    img = eval_timing_centre.centre_fill_reconstruct(
+                        vol[0], trajs[s.traj], vol_shape, cfg.ignore_samples, phases[s.phase], virtual,
+                        n_iter=cfg.cg_iters, ext=cfg.cg_ext)
+                else:
+                    img = eval_ramp.reconstruct(vol[0], trajs[s.traj], vol_shape, cfg.ignore_samples,
+                                                phases[s.phase])
                 mag = np.abs(img)
                 roi[s.name].append(float(mag[sl].mean()))
                 mean_img[s.name] = mag if mean_img[s.name] is None else mean_img[s.name] + mag
         n_read = v + 1
     first_peak = first_peak[:n_read]
-    for p in PHASE_MODELS:
+    for p in phase_list:
         coh[p] = coh[p][:n_read]
         cstd[p] = cstd[p][:n_read]
     ex = min(cfg.exclude, max(n_read - 1, 0))
@@ -359,8 +406,8 @@ def run(cfg: StageConfig) -> Dict[str, Any]:
     fp_mag = np.abs(first_peak).astype(float)
     cv_per_vol = [evalstats.cv(fp_mag[v].tolist()) for v in range(n_read)]
     a_phase = {}
-    gain = {p: coh[p] - coh["none"] for p in PHASE_MODELS}   # > 0: spokes more aligned than raw
-    for p in PHASE_MODELS:
+    gain = {p: coh[p] - coh["none"] for p in phase_list}   # > 0: spokes more aligned than raw
+    for p in phase_list:
         zr = first_peak[rep_vol].astype(np.complex128)
         if phases[p] is not None:
             zr = zr * phases[p][:, cfg.sample_index]
@@ -382,8 +429,8 @@ def run(cfg: StageConfig) -> Dict[str, Any]:
             "correction_phase_last_kept_abs_max_rad": (
                 0.0 if phases[p] is None else float(np.abs(np.angle(phases[p][:, n_ph - 1])).max())),
         }
-    np.savez(out / "phase_metrics.npz", **{f"coh_{p}": coh[p] for p in PHASE_MODELS},
-             **{f"cstd_{p}": cstd[p] for p in PHASE_MODELS})
+    np.savez(out / "phase_metrics.npz", **{f"coh_{p}": coh[p] for p in phase_list},
+             **{f"cstd_{p}": cstd[p] for p in phase_list})
 
     # ---- (b) across volumes -------------------------------------------------
     stab = (evalstats.pattern_stability(fp_mag.tolist(), exclude=ex) if n_read - ex >= 2 else [])
@@ -392,7 +439,7 @@ def run(cfg: StageConfig) -> Dict[str, Any]:
     ss = fp_mag[ex:]
     cv_over_vol = (np.std(ss, axis=0) / np.mean(ss, axis=0)).tolist() if ss.shape[0] > 1 else []
     b_phase = {}
-    for p in PHASE_MODELS:
+    for p in phase_list:
         series = coh[p][:, cfg.sample_index].tolist()
         b_phase[p] = {
             "coherence_timecourse_oscillation": (evalstats.oscillation(series, exclude=ex)
@@ -408,7 +455,7 @@ def run(cfg: StageConfig) -> Dict[str, Any]:
             m = means[s.name]
             gradm = np.sqrt(sum(np.square(np.gradient(m, axis=a)) for a in range(3)))
             entry["sharpness"] = float(gradm.mean() / m.mean())
-            for ref in ("S3", "S1", "S0"):
+            for ref in ("S3", "S1", "S0", "S4"):
                 if ref in means and ref != s.name:
                     entry[f"rel_diff_vs_{ref}"] = float(np.linalg.norm(m - means[ref]) / np.linalg.norm(means[ref]))
         c_stage[s.name] = entry
@@ -419,7 +466,9 @@ def run(cfg: StageConfig) -> Dict[str, Any]:
         "n_volumes_read": n_read, "n_pro": n_pro, "n_points": n_pts,
         "volume_shape": list(vol_shape), "exclude_used": ex,
         "timing": {k: v for k, v in meta.items() if k != "o1_list"},
-        "stages": {s.name: {"traj": s.traj, "phase": s.phase, "label": s.label} for s in stages_run},
+        "stages": {s.name: {"traj": s.traj, "phase": s.phase, "label": s.label, "recon": s.recon}
+                   for s in stages_run},
+        "delay_traj_us": cfg.delay_traj_us, "delay_phase_us": cfg.delay_phase_us,
         "phase_factors_available": have_phase,
         "a_magnitude_cv_median": float(np.median(cv_per_vol[ex:] or cv_per_vol)),
         "a_phase": a_phase,
@@ -604,8 +653,8 @@ def simulate(recon_info: Dict[str, Any], cache_dir: Path, stages: Sequence[str] 
 # Tables and figures
 # ---------------------------------------------------------------------------
 
-PHASE_OF_STAGE = {s.name: s.phase for s in STAGES}
-TRAJ_OF_STAGE = {s.name: s.traj for s in STAGES}
+PHASE_OF_STAGE = {s.name: s.phase for s in STAGES + STAGES_WI0058}
+TRAJ_OF_STAGE = {s.name: s.traj for s in STAGES + STAGES_WI0058}
 
 
 def stage_table(summary: Dict[str, Any]) -> str:
@@ -644,6 +693,8 @@ def stage_table(summary: Dict[str, Any]) -> str:
     add("(c) mean image sharpness", lambda n: c[n]["sharpness"])
     add("(c) mean image rel. diff vs S3", lambda n: c[n]["rel_diff_vs_S3"], ".1%")
     add("(c) mean image rel. diff vs S1", lambda n: c[n]["rel_diff_vs_S1"], ".1%")
+    if "S4" in names:
+        add("(c) mean image rel. diff vs S4", lambda n: c[n]["rel_diff_vs_S4"], ".1%")
     return stagetable.format_stage_table(rows, names, cells, fmt=fmt, first_header="metric")
 
 
@@ -698,8 +749,9 @@ def plot_all(out: Path, cfg: StageConfig, summary, first_peak, phases, kpos, coh
     ex = summary["exclude_used"]
     si = cfg.sample_index
     plabel = {"none": "phase off (S0/S1/S1h/S2)", "legacy": "S1 phase", "legacy_half": "S1h phase",
-              "integral": "S3 phase (integral)"}
-    tlabel = {"off": "S0", "legacy": "S1", "legacy_half": "S1h", "integral": "S2/S3"}
+              "integral": "S3 phase (integral)", "integral_delay": "S4 phase (integral + delay)"}
+    tlabel = {"off": "S0", "legacy": "S1", "legacy_half": "S1h", "integral": "S2/S3",
+              "integral_delay": "S4/S4z"}
 
     # (a) first peak within one volume, per phase model
     fig, ax = plt.subplots(4, 2, figsize=(14, 16))
@@ -707,7 +759,7 @@ def plot_all(out: Path, cfg: StageConfig, summary, first_peak, phases, kpos, coh
     ax[0, 0].plot(np.abs(zr), lw=0.5)
     ax[0, 0].set_title(f"(a) |first peak| (sample {si}) across spokes, volume {rep_vol}: same for every stage")
     ax[0, 0].set_xlabel("spoke"); ax[0, 0].set_ylabel("|FID|")
-    for p in PHASE_MODELS:
+    for p in coh:
         z = zr if phases[p] is None else zr * phases[p][:, si]
         unw = circstats.unwrap(np.angle(z).tolist())
         ax[0, 1].plot(unw, lw=0.6, label=plabel[p])
@@ -735,7 +787,7 @@ def plot_all(out: Path, cfg: StageConfig, summary, first_peak, phases, kpos, coh
 
     # (a) coherence vs sample index, and the gain of each phase model over raw
     fig, ax = plt.subplots(1, 3, figsize=(18, 4.5))
-    for p in PHASE_MODELS:
+    for p in coh:
         ax[0].plot(coh[p][ex:].mean(axis=0), "o-", ms=3, lw=0.8, label=plabel[p])
         ax[1].plot(cstd[p][ex:].mean(axis=0), "o-", ms=3, lw=0.8, label=plabel[p])
         if p != "none":
@@ -782,7 +834,7 @@ def plot_all(out: Path, cfg: StageConfig, summary, first_peak, phases, kpos, coh
     ax[0, 1].set_xlabel("volume")
     ax[1, 0].plot(tc, lw=0.8); ax[1, 0].axvline(ex - 0.5, color="grey", ls="--", lw=0.8)
     ax[1, 0].set_title("(b) mean |first peak| time course: same for every stage"); ax[1, 0].set_xlabel("volume")
-    for p in PHASE_MODELS:
+    for p in coh:
         ax[1, 1].plot(coh[p][:, si], lw=0.7, label=plabel[p])
     ax[1, 1].axvline(ex - 0.5, color="grey", ls="--", lw=0.8)
     ax[1, 1].set_title("(b) first-peak coherence time course per phase model"); ax[1, 1].set_xlabel("volume")
@@ -811,8 +863,16 @@ def plot_all(out: Path, cfg: StageConfig, summary, first_peak, phases, kpos, coh
             if ref in means and len(means) > 1:
                 plot_orthogonal_grid(out / f"c_orthogonal_diff_vs_{ref}.png", means,
                                      f"{title}: stage - {ref}", ref=ref)
+        new = {k: means[k] for k in ("S3", "S4p", "S4", "S4z") if k in means}
+        if len(new) > 1 and "S3" in new:   # WI-0058 stages only
+            plot_orthogonal_grid(out / "c_orthogonal_wi0058.png", new,
+                                 f"{title}: S3 and WI-0058 stages (delay traj {cfg.delay_traj_us} us, "
+                                 f"phase {cfg.delay_phase_us} us)")
+            plot_orthogonal_grid(out / "c_orthogonal_wi0058_diff_vs_S3.png", new,
+                                 f"{title}: WI-0058 stage - S3", ref="S3")
 
 
-__all__ = ["STAGES", "STAGE_NAMES", "Stage", "StageConfig", "stage", "legacy_trajectory",
+__all__ = ["STAGES", "STAGES_WI0058", "STAGE_NAMES", "ALL_STAGE_NAMES", "Stage", "StageConfig", "stage",
+           "legacy_trajectory",
            "stage_trajectory", "implied_tau_us", "stage_phase_factor", "first_peak_k", "run",
            "simulate", "phantom", "stage_table", "plot_orthogonal_grid"]
