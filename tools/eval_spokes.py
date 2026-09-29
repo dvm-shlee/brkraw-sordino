@@ -8,8 +8,8 @@ Two figure families the Director asked for, drawn for every condition
                                         from the FID curve)
 
 1. accumulated FID: every spoke of one volume drawn semi-transparent against
-   the sample index, the spoke mean on top (|FID| only: Director, WI-0058
-   run 2, "magnitude 한 값을 넣는게 맞는것같아요");
+   the sample index, the spoke mean on top (|FID| only, at the Director's
+   request, WI-0058 run 2);
 2. first-peak phase within the volume: the phase across spokes and the
    difference between neighbouring spokes, raw and after each condition's
    correction, plus the correction itself and the first-peak k position.
