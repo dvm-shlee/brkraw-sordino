@@ -192,6 +192,14 @@ def _get_fid_identity(fid_entry: FileIO) -> str:
     return getattr(fid_entry, "name", "fid")
 
 
+#: Options that do not change the reconstructed values, so they are not part of the
+#: recon (and spoke-timing) cache key (WI-0071, D-0098 3): ``as_complex`` and
+#: ``split_ch`` choose what is returned from the cache, ``clear_cache`` whether
+#: leftover temporary files are removed, ``cache_dir`` where the cache lives.
+#: Every other option is in the key, including options added later.
+RECON_KEY_EXCLUDED = ("as_complex", "split_ch", "clear_cache", "cache_dir")
+
+
 def _build_cache_params(
     scan: Any,
     reco_id: Optional[int],
@@ -199,11 +207,12 @@ def _build_cache_params(
     options: Options,
     recon_info: Dict[str, Any],
 ) -> Dict[str, Any]:
+    keyed = {k: v for k, v in asdict(options).items() if k not in RECON_KEY_EXCLUDED}
     return {
         "scan_id": getattr(scan, "scan_id", None),
         "reco_id": reco_id,
         "fid": _get_fid_identity(fid_entry),
-        "options": asdict(options),
+        "options": keyed,
         "recon_info": recon_info,
         "timing_tuning": {k: asdict(v) for k, v in TIMING_TUNING.items()},
     }
@@ -330,12 +339,37 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
     frame_bytes = int(np.prod(cached_shape[:-1])) * cdt.itemsize
     cache_nbytes = int(np.prod(cached_shape)) * cdt.itemsize
     disk_nbytes = 0 if cached else cache_nbytes
+    stc_stage_nbytes = 0
     if not cached and options.correct_spoketiming and int(recon_info.get("NRepetitions") or 1) > 1:
         fid_shape, fid_dtype = parse_fid_info(recon_info)
         stc_nbytes = int(np.prod(fid_shape)) * np.dtype(fid_dtype).itemsize * n_total
         # a valid spoke-timing cache is reused, so it needs no new disk space
         if stc_cache_path is None or not _is_cache_valid(stc_cache_path, expected_size=stc_nbytes):
             disk_nbytes += stc_nbytes
+            # the spoke-timing stage works on one segment of projections (all selected
+            # frames) at a time; the segment count follows mem_limit and the FID file
+            # size as in spoketiming.prep_fid_segmentation. The file is not opened here:
+            # its smallest possible size (the frames up to offset + frames read), with
+            # the same num_frames scaling, gives the fewest and largest segments, so the
+            # estimate is never below the run (wi-0071-choi-5 F1)
+            from .spoketiming import get_num_segment
+            scale = 1.0
+            if options.num_frames is not None:
+                scale = get_num_frames(recon_info, options) / options.num_frames
+            file_gb = (int(np.prod(fid_shape)) * np.dtype(fid_dtype).itemsize
+                       * (int(options.offset or 0) + n_total) * scale / memguard.GIB)
+            segs = get_num_segment(file_gb, recon_info, options)
+            seg_fraction = float(max(segs)) / float(recon_info["NPro"])
+            stc_stage_nbytes = int(np.ceil(memguard.SPOKETIMING_FACTOR * stc_nbytes * seg_fraction))
+    # Reconstruction step (D-0098 2): runs first in the same process when no cache
+    # exists; with gc after every frame its working memory does not grow with the
+    # frame count. Added to the read estimate (conservative: the two are not at their
+    # peaks at the same time).
+    recon_share = 0
+    if not cached:
+        recon_share = memguard.recon_nbytes(
+            int(recon_info["NPro"]), int(recon_info["NPoints"]), n_ch, vol,
+            estimate_k0=bool(options.estimate_k0), spoketiming_nbytes=stc_stage_nbytes)
     info: Dict[str, Any] = {
         "shape": shape,
         "dtype": real_dt.str,
@@ -348,7 +382,8 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
         "cache_dir": str(options.cache_dir),
         "cache_dtype": cdt.str,
         "cache_nbytes": cache_nbytes,
-        "peak_nbytes": nbytes + 3 * frame_bytes,
+        "peak_nbytes": nbytes + 3 * frame_bytes + recon_share,
+        "recon_nbytes": recon_share,
         "disk_nbytes": disk_nbytes,
         "disk_free_nbytes": None if cached else memguard.free_disk_bytes(Path(options.cache_dir)),
     }
@@ -409,7 +444,9 @@ def get_dataobj_info(scan: Any, reco_id: Optional[int] = None, **kwargs: Any) ->
     Keys: ``shape`` and ``dtype`` of each returned array, ``count`` (arrays
     returned), ``nbytes`` (all arrays), ``frames``, ``cached`` (a valid recon
     cache exists; if not, ``get_dataobj`` reconstructs first), ``cache_nbytes``,
-    ``peak_nbytes`` (memory estimate), ``limit_nbytes`` and ``limit_source``
+    ``peak_nbytes`` (memory estimate: the returned arrays, three cache frames and,
+    without a cache, ``recon_nbytes`` for the reconstruction step,
+    ``memguard.recon_nbytes``), ``limit_nbytes`` and ``limit_source``
     (the memory limit that ``get_dataobj`` applies), ``disk_nbytes`` and
     ``disk_free_nbytes``. Before a cache exists the cache dtype is assumed to
     be complex128.

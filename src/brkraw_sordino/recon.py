@@ -1,3 +1,4 @@
+import gc
 import os
 import json
 import hashlib
@@ -388,6 +389,12 @@ def recon_dataobj(fid_fobj,
         if n == 0:
             dtype = recon_vol.dtype
         img_fobj.write(recon_vol.T.flatten(order="C").tobytes())
+        # Free the frame's garbage now (WI-0071, D-0098 2): without this, unreachable
+        # reference cycles of the NUFFT step pile up between collections and the
+        # reconstruction peak grows with the frame count (300 v1 frames: 2369 MiB
+        # without, 455 MiB with, about 12 % more time).
+        del recon_vol, vol, k_full, k_space
+        gc.collect()
     logger.debug("done")
     return dtype
 

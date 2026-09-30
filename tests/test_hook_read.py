@@ -41,8 +41,8 @@ def setup(tmp_path, monkeypatch):
         info = _recon_info(n_rx)
         monkeypatch.setattr(hook, "_parse_recon_info", lambda scan: dict(info))
         monkeypatch.setattr(hook, "_get_fid_entry", lambda scan: _Fid())
-        # as_complex/split_ch are part of today's recon cache key (see the brief), so the
-        # synthetic cache is written under the key of the options the test uses
+        # the synthetic cache is written under the key of the options the test uses
+        # (as_complex/split_ch left the key in D-0098 3; test_recon_cache_key.py)
         kwargs = {"cache_dir": str(tmp_path), **opts}
         plan = hook._plan(_Scan(), None, dict(kwargs))
         shape = ([n_rx] if n_rx > 1 else []) + list(VOL) + [NF]

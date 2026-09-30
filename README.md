@@ -121,10 +121,18 @@ cache and are not part of the cache key):
   cache, and stops with `SordinoResourceError` (a `MemoryError`) when the
   memory estimate is above this limit or the cache does not fit on the disk.
   Nothing is reconstructed or read in that case; ask for fewer frames or raise
-  the limit. The estimate covers the returned arrays and the read buffers
-  only. When no cache exists, the reconstruction runs first in the same
-  process and its memory is not part of the estimate: on a 900-frame v1 scan
-  (64^3) the whole call peaked at 4.2 GiB against an estimate of 1.8 GiB.
+  the limit. The error's `retry_kwargs` holds the smallest limit (0.1 GB steps)
+  that would pass, for example `{"max_memory_gb": 1.8}`; the brkraw CLI uses it
+  to ask "Proceed anyway?" in a terminal. The estimate covers the returned
+  arrays and the read buffers, and, when no cache exists, the reconstruction
+  step that runs first in the same process (`recon_nbytes`: one frame's
+  trajectory, k-space and NUFFT grid, fitted to measurements, plus the
+  least-squares solve with `estimate_k0`; with spoke-timing correction, the
+  larger of that and 5 x one FID segment, whose size follows `mem_limit`).
+  The reconstruction frees each frame's
+  memory before the next (`gc.collect()`), so this share does not grow with the
+  number of frames (v1 64^3 scan: about 0.3 GiB; before this, a 900-frame run
+  peaked at 4.2 GiB).
 
 `brkraw_sordino.get_dataobj_info(scan, reco_id, **options)` returns the same
 estimate without reading data (shape, dtype and count of the returned arrays,
@@ -154,6 +162,11 @@ is ignored with a one-line warning.
   (complex128 reconstruction, all reconstructed frames) with its `.json`, and `traj_<hash>.npy`
   (trajectory). `clear_cache` does not remove these files: they stay for reuse until
   `brkraw cache clear`, and a temporary file left by an interrupted run is replaced by the next run.
+- The recon cache is keyed by the scan, reco, FID and every option that changes the reconstructed
+  values. `as_complex`, `split_ch`, `clear_cache` and `cache_dir` are not in the key (they choose
+  what is returned, what is cleaned up, or where the cache lives), so changing them reads the same
+  cache instead of reconstructing again. Recon caches written before this change are not read
+  (reconstructed once); remove them with `brkraw cache clear`.
 - The trajectory file is keyed only by the values that generate the trajectory (gradient
   scheme, samples per spoke, and the sample offset or the ramp-model sample times), so options
   such as `ext_factors` or frames reuse it. Trajectory files written before 0.6.0 (`<md5>.npy`)
