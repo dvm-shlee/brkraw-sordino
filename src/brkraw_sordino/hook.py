@@ -68,6 +68,14 @@ def _get_cache_dir(path: Optional[Union[str, Path]]) -> Path:
     return base
 
 
+#: Read-time options (WI-0071): they choose what get_dataobj returns from the
+#: recon cache and how much memory it may use, so they are not part of
+#: ``Options`` and not part of the recon cache key.
+READ_KEYS = ("frames", "axis", "max_memory_gb")
+#: Names accepted for the frame axis (the repetition axis, data axis 3).
+FRAME_AXIS_NAMES = ("cycle", "repetition")
+
+
 def _build_options(kwargs: Dict[str, Any]) -> Options:
     logger.debug("Sordino hook kwargs: %s", kwargs)
     known_keys = {
@@ -84,7 +92,7 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         "split_ch",
         "as_complex",
         "estimate_k0",
-    }
+    } | set(READ_KEYS)
     unknown_keys = sorted(set(kwargs.keys()) - known_keys)
     if unknown_keys:
         logger.warning(
@@ -251,15 +259,184 @@ def _get_fid_entry(scan: Any) -> FileIO:
     return cast(FileIO, fid_entry)
 
 
+def _is_frame_axis(axis: Any) -> bool:
+    if isinstance(axis, bool):
+        return False
+    if isinstance(axis, (int, np.integer)):
+        return int(axis) in (3, -1)
+    if isinstance(axis, str):
+        return axis.strip().lower() in FRAME_AXIS_NAMES
+    return False
+
+
+def _frame_selection(axis: Any, frames: Any, n_total: int) -> Tuple[Optional[list], bool]:
+    """(frame indices or None for all, frame axis kept), with brkraw's ``frames`` rules.
+
+    As in ``brkraw`` ``get_dataobj``: an int picks one frame and removes the
+    axis, a list keeps the axis in that order, ``"start:stop[:step]"`` is a
+    Python slice. Frames count the reconstructed frames (0 is frame ``offset``).
+    ``axis`` may be omitted (the only frame axis), 3/-1, or "cycle"/"repetition".
+    """
+    if frames is None:
+        if axis is not None:
+            raise ValueError("axis needs frames (which frames of that axis to keep).")
+        return None, True
+    if axis is not None and not _is_frame_axis(axis):
+        raise ValueError(
+            f"sordino: axis {axis!r} is not the frame axis; SORDINO data have one frame axis "
+            "(data axis 3, 'cycle' or 'repetition').")
+    from brkraw.specs.context_map.output import parse_frames
+
+    try:
+        _, kept, norm, notes = parse_frames(frames, int(n_total))
+    except ValueError as exc:
+        raise ValueError(str(exc).replace("split: ", "sordino frames: ", 1)) from None
+    for note in notes:
+        logger.warning(note.replace("split: ", "sordino frames: ", 1))
+    return list(norm), bool(kept)
+
+
+def _oriented_spatial_shape(vol_shape, recon_info: Dict[str, Any]) -> list:
+    """Spatial shape after ``orientation.correct`` (a transpose), without data."""
+    probe = np.broadcast_to(np.zeros((), dtype=np.uint8), tuple(int(v) for v in vol_shape))
+    try:
+        return list(correct_orientation(probe, recon_info).shape)
+    except Exception as exc:  # orientation values missing: shape as reconstructed
+        logger.warning("sordino size report: orientation not applied to the reported shape (%s).", exc)
+        return list(vol_shape)
+
+
+def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cache_dtype,
+                 frame_list: Optional[list], keep_axis: bool, *, cached: bool,
+                 cache_path: Path, max_memory_gb: Any,
+                 stc_cache_path: Optional[Path] = None) -> Dict[str, Any]:
+    """What get_dataobj would return and need, before reading anything (C9, WI-0071)."""
+    from . import memguard
+
+    cached_shape = [int(v) for v in cached_shape]
+    cdt = np.dtype(cache_dtype)
+    real_dt = np.empty(0, dtype=cdt).real.dtype
+    multi = len(cached_shape) == 5
+    n_ch = cached_shape[0] if multi else 1
+    vol = cached_shape[1:4] if multi else cached_shape[:3]
+    n_total = cached_shape[-1]
+    n_sel = n_total if frame_list is None else len(frame_list)
+    per_ch = multi and options.split_ch
+    count = (n_ch if per_ch else 1) * (2 if options.as_complex else 1)
+    shape = _oriented_spatial_shape(vol, recon_info)
+    if keep_axis:
+        shape = shape + [n_sel]
+    nbytes = int(count * int(np.prod(shape)) * real_dt.itemsize)
+    frame_bytes = int(np.prod(cached_shape[:-1])) * cdt.itemsize
+    cache_nbytes = int(np.prod(cached_shape)) * cdt.itemsize
+    disk_nbytes = 0 if cached else cache_nbytes
+    if not cached and options.correct_spoketiming and int(recon_info.get("NRepetitions") or 1) > 1:
+        fid_shape, fid_dtype = parse_fid_info(recon_info)
+        stc_nbytes = int(np.prod(fid_shape)) * np.dtype(fid_dtype).itemsize * n_total
+        # a valid spoke-timing cache is reused, so it needs no new disk space
+        if stc_cache_path is None or not _is_cache_valid(stc_cache_path, expected_size=stc_nbytes):
+            disk_nbytes += stc_nbytes
+    info: Dict[str, Any] = {
+        "shape": shape,
+        "dtype": real_dt.str,
+        "count": count,
+        "nbytes": nbytes,
+        "frames": n_sel,
+        "frames_reconstructed": n_total,
+        "cached": bool(cached),
+        "cache_path": str(cache_path),
+        "cache_dir": str(options.cache_dir),
+        "cache_dtype": cdt.str,
+        "cache_nbytes": cache_nbytes,
+        "peak_nbytes": nbytes + 3 * frame_bytes,
+        "disk_nbytes": disk_nbytes,
+        "disk_free_nbytes": None if cached else memguard.free_disk_bytes(Path(options.cache_dir)),
+    }
+    info.update(memguard.memory_limit_bytes(max_memory_gb))
+    return info
+
+
+#: dtype the reconstruction writes today (complex128, WI-0071 M1/M2; pinned by
+#: tests/test_hook_read.py); used for the estimate before a cache exists.
+RECON_CACHE_DTYPE = np.dtype("<c16")
+
+
+def _plan(scan: Any, reco_id: Optional[int], kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Options, cache paths, cache state, frame selection and the size estimate."""
+    options = _build_options(kwargs)
+    recon_info = _parse_recon_info(scan)
+    options = _resolve_k0(options, recon_info)
+    fid_entry = _get_fid_entry(scan)
+    cache_params = _build_cache_params(scan, reco_id, fid_entry, options, recon_info)
+    img_cache_path = build_recon_cache_path(options.cache_dir, cache_params)
+    img_meta = _load_cache_meta(_cache_meta_path(img_cache_path))
+    cached_dtype: Optional[np.dtype] = None
+    cached_shape: Optional[list[int]] = None
+    if img_meta:
+        try:
+            cached_dtype = np.dtype(img_meta.get("dtype"))
+            cached_shape = img_meta.get("shape")
+            if cached_shape:
+                expected_size = int(np.prod(cached_shape) * cached_dtype.itemsize)
+                if not _is_cache_valid(img_cache_path, expected_size=expected_size):
+                    cached_dtype = None
+                    cached_shape = None
+        except Exception:
+            cached_dtype = None
+            cached_shape = None
+    cached = cached_dtype is not None and bool(cached_shape)
+    shape_for_plan = cached_shape if cached else list(get_dataobj_shape(recon_info, options))
+    frame_list, keep_axis = _frame_selection(kwargs.get("axis"), kwargs.get("frames"),
+                                             int(shape_for_plan[-1]))
+    info = _output_info(recon_info, options, shape_for_plan,
+                        cached_dtype if cached else RECON_CACHE_DTYPE, frame_list, keep_axis,
+                        cached=cached, cache_path=img_cache_path,
+                        max_memory_gb=kwargs.get("max_memory_gb"),
+                        stc_cache_path=build_spoketiming_cache_path(options.cache_dir, cache_params))
+    return {
+        "options": options, "recon_info": recon_info, "fid_entry": fid_entry,
+        "cache_params": cache_params, "img_cache_path": img_cache_path, "img_meta": img_meta,
+        "cached_dtype": cached_dtype if cached else None,
+        "cached_shape": cached_shape if cached else None,
+        "frame_list": frame_list, "keep_axis": keep_axis, "info": info,
+    }
+
+
+def get_dataobj_info(scan: Any, reco_id: Optional[int] = None, **kwargs: Any) -> Dict[str, Any]:
+    """Size of what ``get_dataobj`` returns with the same arguments, without reading data.
+
+    For callers that decide before loading (viewer size notice, WI-0069/C9).
+    Keys: ``shape`` and ``dtype`` of each returned array, ``count`` (arrays
+    returned), ``nbytes`` (all arrays), ``frames``, ``cached`` (a valid recon
+    cache exists; if not, ``get_dataobj`` reconstructs first), ``cache_nbytes``,
+    ``peak_nbytes`` (memory estimate), ``limit_nbytes`` and ``limit_source``
+    (the memory limit that ``get_dataobj`` applies), ``disk_nbytes`` and
+    ``disk_free_nbytes``. Before a cache exists the cache dtype is assumed to
+    be complex128.
+    """
+    return _plan(scan, reco_id, kwargs)["info"]
+
+
 def get_dataobj(
         scan: Any, reco_id: Optional[int] = None, **kwargs: Any,
     ) -> Optional[Union[np.ndarray, Tuple[np.ndarray, ...]]]:
-    
-    options = _build_options(kwargs)
+    """Reconstruct (or read from the recon cache) the SORDINO images.
+
+    Read-time options (WI-0071): ``frames``/``axis`` as in brkraw (only the
+    selected frames are read from the cache), ``max_memory_gb`` (limit of the
+    memory check; default half of the physical memory). Before reconstructing
+    or reading, the expected memory and cache disk space are checked and
+    ``memguard.SordinoResourceError`` is raised when they exceed the limit.
+    """
+    from . import memguard
+    from .cacheio import read_recon_frames
+
+    plan = _plan(scan, reco_id, kwargs)
+    options: Options = plan["options"]
+    recon_info = plan["recon_info"]
+    info = plan["info"]
     cache_files: list[str] = []
     setattr(scan, "_sordino_cache_files", cache_files)
-    recon_info = _parse_recon_info(scan)
-    options = _resolve_k0(options, recon_info)
     logger.debug("Sordino options correct_spoketiming=%s", options.correct_spoketiming)
     setattr(scan, "_sordino_options", options)
     try:
@@ -269,27 +446,16 @@ def get_dataobj(
         setattr(scan, "_sordino_spatial_shape", None)
     recon_meta = _recon_metadata(recon_info, options)
     setattr(scan, "_sordino_recon_meta", recon_meta)
-    fid_entry = _get_fid_entry(scan)
-    cache_params = _build_cache_params(scan, reco_id, fid_entry, options, recon_info)
-    img_cache_path = build_recon_cache_path(options.cache_dir, cache_params)
+    setattr(scan, "_sordino_dataobj_info", info)
+    memguard.check(info)
+    fid_entry = plan["fid_entry"]
+    cache_params = plan["cache_params"]
+    img_cache_path = plan["img_cache_path"]
     img_meta_path = _cache_meta_path(img_cache_path)
-    img_meta = _load_cache_meta(img_meta_path)
-    cached_dtype: Optional[np.dtype] = None
-    cached_shape: Optional[list[int]] = None
-    if img_meta:
-        try:
-            cached_dtype = np.dtype(img_meta.get("dtype"))
-            cached_shape = img_meta.get("shape")
-            if options.estimate_k0:
-                recon_meta["k0"] = img_meta.get("k0")
-            if cached_shape:
-                expected_size = int(np.prod(cached_shape) * cached_dtype.itemsize)
-                if not _is_cache_valid(img_cache_path, expected_size=expected_size):
-                    cached_dtype = None
-                    cached_shape = None
-        except Exception:
-            cached_dtype = None
-            cached_shape = None
+    cached_dtype: Optional[np.dtype] = plan["cached_dtype"]
+    cached_shape: Optional[list[int]] = plan["cached_shape"]
+    if cached_dtype is not None and options.estimate_k0 and plan["img_meta"]:
+        recon_meta["k0"] = plan["img_meta"].get("k0")
 
     if cached_dtype is None or cached_shape is None:
         with fid_entry.open() as fid_fobj:
@@ -390,30 +556,19 @@ def get_dataobj(
     if cached_shape is None:
         cached_shape = list(get_dataobj_shape(recon_info, options))
     assert cached_dtype is not None
-    with open(img_cache_path, "rb") as img_fobj:
-        dataobj = np.frombuffer(img_fobj.read(), dtype=cached_dtype).reshape(cached_shape, order='F')
-    num_receivers = recon_info.get("EncNReceivers", 1)
-    if not options.as_complex:
-        logger.debug("Converting to magnitude (as_complex=False).")
-        dataobj = np.abs(dataobj)
-    else:
-        logger.debug("Keeping complex data (as_complex=True).")
-
-    is_multi = num_receivers > 1
-    if not options.split_ch and is_multi:
-        logger.debug("Combining multi-channel data (split_ch=False).")
-        if options.as_complex:
-            logger.debug("Combining complex channels by summation.")
-            dataobj = np.sum(dataobj, axis=0)
-            is_multi = False
-        else:
-            logger.debug("Combining magnitude channels by RSS.")
-            dataobj = np.sqrt(np.sum(dataobj ** 2, axis=0))
-            is_multi = False
-    elif options.split_ch and is_multi:
-        logger.debug("Keeping multi-channel data (split_ch=True).")
-    else:
-        logger.debug("Single-channel data detected.")
+    # Frame by frame into one result (WI-0071): magnitude unless as_complex, and the
+    # channels combined (RSS of magnitudes, or the complex sum) unless split_ch.
+    is_multi = len(cached_shape) == 5
+    combine = is_multi and not options.split_ch
+    logger.debug("Reading recon cache frame by frame (as_complex=%s, combine channels=%s, frames=%s).",
+                 options.as_complex, combine,
+                 "all" if plan["frame_list"] is None else len(plan["frame_list"]))
+    dataobj = read_recon_frames(img_cache_path, cached_dtype, cached_shape, plan["frame_list"],
+                                as_complex=options.as_complex, combine_channels=combine)
+    if combine:
+        is_multi = False
+    if not plan["keep_axis"]:
+        dataobj = dataobj[..., 0]
 
     if options.as_complex:
         logger.debug("Formatting complex output.")
@@ -560,4 +715,4 @@ def convert(
 
 HOOK = {"get_dataobj": get_dataobj, "get_affine": get_affine, "convert": convert}
 
-__all__ = ["HOOK", "get_dataobj", "get_affine", "convert"]
+__all__ = ["HOOK", "get_dataobj", "get_dataobj_info", "get_affine", "convert"]

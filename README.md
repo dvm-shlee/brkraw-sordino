@@ -104,6 +104,33 @@ Supported keys:
 - `as_complex`: bool (default: false, return complex as (real, imag))
 - `cache_dir`: string path (default: ~/.brkraw/cache/sordino)
 
+Read-time options (they choose what is returned from the reconstruction
+cache and are not part of the cache key):
+
+- `frames`: which reconstructed frames to return, with the brkraw rules: an int
+  picks one frame and removes the frame axis, a list keeps the axis in that
+  order, `"start:stop[:step]"` is a Python slice. Frames count the
+  reconstructed frames (0 is frame `offset`). Only the selected frames are
+  read from the cache. The whole scan (or `num_frames` from `offset`) is still
+  reconstructed when no cache exists.
+- `axis`: optional; the frame axis is data axis 3 (`3`, `-1`, `"cycle"` or
+  `"repetition"`). `axis` without `frames` is an error.
+- `max_memory_gb`: float (default: half of this computer's physical memory,
+  4 GB when it cannot be read). Before it reconstructs or reads, the hook
+  estimates the memory of the returned data and the disk space of a new
+  cache, and stops with `SordinoResourceError` (a `MemoryError`) when the
+  memory estimate is above this limit or the cache does not fit on the disk.
+  Nothing is reconstructed or read in that case; ask for fewer frames or raise
+  the limit. The estimate covers the returned arrays and the read buffers
+  only. When no cache exists, the reconstruction runs first in the same
+  process and its memory is not part of the estimate: on a 900-frame v1 scan
+  (64^3) the whole call peaked at 4.2 GiB against an estimate of 1.8 GiB.
+
+`brkraw_sordino.get_dataobj_info(scan, reco_id, **options)` returns the same
+estimate without reading data (shape, dtype and count of the returned arrays,
+bytes, whether a valid cache exists, cache size, memory estimate and limit),
+for callers that decide before loading.
+
 Boolean values are read case-insensitively: `true`, `True`, `TRUE`, `false`,
 `False` (also `1`, `0`, `yes`, `no`, `on`, `off`), from YAML or from
 `--hook-arg`; any other value is an error. A key the hook does not know
@@ -123,4 +150,11 @@ is ignored with a one-line warning.
 - Multi-channel data defaults to merged channels; set `split_ch=true` to keep channels split.
 - When `split_ch=false`, magnitude uses RSS while complex uses coherent sum.
 - Orientation is normalized when the first 3D axes are spatial; see `notebooks/orientation.ipynb`.
-- Cache files live under `~/.brkraw/cache/sordino` (or `BRKRAW_CONFIG_HOME`) and are cleared when `clear_cache=true`.
+- Cache files live under `~/.brkraw/cache/sordino` (or `BRKRAW_CONFIG_HOME`): `recon_<hash>.bin`
+  (complex128 reconstruction, all reconstructed frames) with its `.json`, and `traj_<hash>.npy`
+  (trajectory). `clear_cache` does not remove these files: they stay for reuse until
+  `brkraw cache clear`, and a temporary file left by an interrupted run is replaced by the next run.
+- The trajectory file is keyed only by the values that generate the trajectory (gradient
+  scheme, samples per spoke, and the sample offset or the ramp-model sample times), so options
+  such as `ext_factors` or frames reuse it. Trajectory files written before 0.6.0 (`<md5>.npy`)
+  are no longer read; they can be removed with `brkraw cache clear`.

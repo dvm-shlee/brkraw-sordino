@@ -2,7 +2,10 @@ from typing import Optional, Dict, Any
 from pathlib import Path
 import numpy as np
 import hashlib
+import json
 import logging
+import os
+import tempfile
 from .helper import progressbar
 from .typing import Options
 
@@ -274,47 +277,107 @@ def reorder_projections(
     return g
 
 
-def generate_hash(*args: Any) -> str:
-    """Generate a hash from the input arguments."""
-    hash_input = "".join(str(arg) for arg in args)
-    return hashlib.md5(hash_input.encode()).hexdigest()
+#: Version of the trajectory formulas in the cache key (WI-0071). Increase it
+#: whenever a function that shapes the array changes its result:
+#: calc_radial_grad3d, find_undersamp (including the brentq tolerance),
+#: calc_npro, radial_angles, radial_angle, reorder_projections,
+#: calc_radial_traj3d or calc_radial_traj3d_integral, so that trajectories saved
+#: by older code are not reused. tests/test_traj_cache_key.py holds a golden
+#: value that fails when the formulas change.
+TRAJ_CACHE_VERSION = 2
 
 
-def get_trajectory(recon_info: Dict[str, Any], 
+def trajectory_cache_key(grad_params: Dict[str, Any], n_samples: int,
+                         model: Dict[str, Any]) -> str:
+    """Hash of the values that generate a trajectory, and nothing else (WI-0071).
+
+    ``grad_params`` are the arguments of ``calc_radial_grad3d``, ``n_samples``
+    the samples per spoke and ``model`` the per-sample inputs of the chosen
+    formula (fixed vector: the offset in samples; integral: sample times, ramp
+    integrals and dwell). Values are written as named JSON fields (floats in
+    their exact repr), so different values cannot give the same text, and
+    options that do not change the trajectory (``ext_factors``, frames,
+    channels, the phase-only tuning ``phase_ref_us`` ...) are not part of it.
+    """
+    payload = {
+        "version": TRAJ_CACHE_VERSION,
+        "grad": grad_params,
+        "n_samples": int(n_samples),
+        "model": model,
+    }
+    text = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _load_cached_trajectory(path: Path, expected_shape: tuple) -> Optional[np.ndarray]:
+    """The saved trajectory, or None when it is missing, unreadable or of another shape."""
+    if not path.exists():
+        return None
+    try:
+        traj = np.load(path, allow_pickle=False)
+    except Exception as exc:  # damaged or partly written file: compute again
+        logger.warning("Trajectory cache %s is unreadable (%s); computing it again.", path.name, exc)
+        return None
+    if traj.shape != expected_shape or traj.dtype != np.float64:
+        logger.warning("Trajectory cache %s has shape %s and dtype %s, expected %s float64; "
+                       "computing it again.", path.name, traj.shape, traj.dtype, expected_shape)
+        return None
+    return traj
+
+
+def _save_trajectory(path: Path, traj: np.ndarray) -> None:
+    """Write through a temporary file of this process and rename it, so a reader never
+    sees half a file and two processes saving the same trajectory do not share one file."""
+    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".partial")
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            np.save(handle, traj, allow_pickle=False)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.remove(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def get_trajectory(recon_info: Dict[str, Any],
                    options: Options) -> np.ndarray:
-    
-    correct_ramptime = bool(getattr(options, "correct_ramptime", True))
-    ext_factors = getattr(options, "ext_factors", [1.0, 1.0, 1.0])
-    logger.debug(f' + Extension factors applied to matrix: {ext_factors}')
 
-    sample_size = recon_info['Matrix'][0]
-    npro = recon_info['NPro']
-    half_acquisition = recon_info['HalfAcquisition']
-    use_origin = recon_info['UseOrigin']
-    reorder = recon_info['Reorder']
-    
+    correct_ramptime = bool(getattr(options, "correct_ramptime", True))
+
+    sample_size = int(recon_info['Matrix'][0])
+    npro = int(recon_info['NPro'])
+    half_acquisition = bool(recon_info['HalfAcquisition'])
+    use_origin = bool(recon_info['UseOrigin'])
+    reorder = bool(recon_info['Reorder'])
+
     eff_bandwidth = recon_info['EffBandwidth_Hz']
     over_sampling = recon_info['OverSampling']
     traj_offset = recon_info['AcqDelayTotal_us']
+    n_samples = int(sample_size / 2 * over_sampling)
 
-    grad = calc_radial_grad3d(sample_size, 
-                              npro, 
-                              half_acquisition, 
-                              use_origin, 
+    grad = calc_radial_grad3d(sample_size,
+                              npro,
+                              half_acquisition,
+                              use_origin,
                               reorder)
-    offset_factor = traj_offset * (10 ** -6) * eff_bandwidth * over_sampling
+    grad_params = {"matrix_size": sample_size, "npro_target": npro,
+                   "half_sphere": half_acquisition, "use_origin": use_origin,
+                   "reorder": reorder}
 
     use_integral = correct_ramptime
-    timing_desc = None
     if use_integral:
         from . import timing as timing_mod
 
         seq = timing_mod.read_timing(recon_info)
         tune = timing_mod.tuning_for(seq.version)
-        n_samples = int(sample_size / 2 * over_sampling)
         times_us, f_us, _ = timing_mod.ramp_terms(seq, tune, n_samples)
-        timing_desc = timing_mod.describe(seq, tune)
-        logger.debug(" + Ramp model: integral, %s", timing_desc)
+        logger.debug(" + Ramp model: integral, %s", timing_mod.describe(seq, tune))
+        model = {"formula": "integral",
+                 "times_us": [float(v) for v in times_us],
+                 "ramp_integral_us": [float(v) for v in f_us],
+                 "dwell_us": float(seq.dwell_us)}
         # BRK-0059/BRK-0060: the unsampled centre is a property of the
         # sequence and the user has nothing to do about it, so it is logged
         # (info for a general ZTE gap over 1 k-grid unit, debug otherwise),
@@ -328,36 +391,25 @@ def get_trajectory(recon_info: Dict[str, Any],
                 gap["gap_kgrid"], seq.acq_delay_total_us)
         else:
             logger.debug(" + k-space centre gap: %s", gap)
-
-    option_for_hash = (
-        float(traj_offset),
-        sample_size,
-        eff_bandwidth,
-        over_sampling,
-            int(npro),
-            float(np.prod(ext_factors)),
-            bool(half_acquisition),
-            bool(use_origin),
-            bool(reorder),
-        correct_ramptime,
-    )
-    if correct_ramptime:
-        option_for_hash = option_for_hash + ("integral", repr(timing_desc))
-
-    digest = generate_hash(*option_for_hash)
-    traj_path = options.cache_dir / f"{digest}.npy"
-    if traj_path.exists():
-        logger.debug("Trajectory cache hit: %s", traj_path)
-        traj = np.load(traj_path)
     else:
-        logger.info("Computing trajectory (matrix=%s, n_pro=%s).", sample_size, npro)
-        if use_integral:
-            traj = calc_radial_traj3d_integral(
-                grad, sample_size, over_sampling, times_us, f_us, seq.dwell_us)
-        else:
-            traj = calc_radial_traj3d(grad, sample_size, over_sampling, offset_factor)
-        np.save(traj_path, traj)
-        logger.debug("Saved trajectory cache: %s", traj_path)
+        offset_factor = float(traj_offset * (10 ** -6) * eff_bandwidth * over_sampling)
+        model = {"formula": "fixed", "traj_offset_samples": offset_factor}
+
+    digest = trajectory_cache_key(grad_params, n_samples, model)
+    traj_path = Path(options.cache_dir) / f"traj_{digest}.npy"
+    expected_shape = (int(grad.shape[1]), n_samples, 3)
+    traj = _load_cached_trajectory(traj_path, expected_shape)
+    if traj is not None:
+        logger.debug("Trajectory cache hit: %s", traj_path)
+        return traj
+    logger.info("Computing trajectory (matrix=%s, n_pro=%s).", sample_size, npro)
+    if use_integral:
+        traj = calc_radial_traj3d_integral(
+            grad, sample_size, over_sampling, times_us, f_us, seq.dwell_us)
+    else:
+        traj = calc_radial_traj3d(grad, sample_size, over_sampling, offset_factor)
+    _save_trajectory(traj_path, traj)
+    logger.debug("Saved trajectory cache: %s", traj_path)
     return traj
 
 __all__ = [
