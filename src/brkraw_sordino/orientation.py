@@ -68,6 +68,19 @@ def correct(dataobj: NDArray, recon_info: Dict[str, Any]) -> NDArray[Any]:
     return dataobj
 
 
+def axis_order(recon_info: Dict[str, Any]) -> tuple:
+    """Reconstruction axis that ``correct`` puts on each output axis.
+
+    ``axis_order(info)[j] == i`` means output axis ``j`` holds reconstruction axis ``i``
+    (``PVM_Matrix`` order: read, phase, slice). Derived from ``correct`` itself on a
+    zero-stride probe, so it can never disagree with the data path.
+    """
+    probe = np.broadcast_to(np.zeros((), dtype=np.uint8), (2, 3, 4))
+    shape = correct(probe, recon_info).shape
+    return tuple({2: 0, 3: 1, 4: 2}[int(n)] for n in shape[:3])
+
+
 __all__ = [
+    "axis_order",
     "correct",
 ]

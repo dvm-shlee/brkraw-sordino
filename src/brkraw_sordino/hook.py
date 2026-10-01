@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import numpy as np
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from typing import Any, Optional, Tuple, Dict, Union, cast
@@ -35,6 +35,7 @@ from .spoketiming import (
     prep_fid_segmentation,
     correct_spoketiming,
 )
+from .orientation import axis_order as orientation_axis_order
 from .orientation import correct as correct_orientation
 from .recon import phase_correction_factor
 from .timing import TIMING_TUNING
@@ -641,26 +642,28 @@ def get_affine(
         decimals: Optional[int] = None,
         **kwargs: Any,
     ) -> Optional[Union[np.ndarray, Tuple[np.ndarray, ...]]]:
+    """brkraw affine, with the origin moved for ``ext_factors`` (WI-0081, D-0104).
+
+    ``ext_factors[i]`` scales reconstruction axis ``i`` (``PVM_Matrix`` order: read, phase,
+    slice of the acquisition). The data reach the caller after ``orientation.correct``, so the
+    shift is applied per output axis: ``-(N // 2 - N0 // 2)`` voxels, ``N`` the extended size,
+    ``N0`` the ``ext_factors=1`` size, the adjoint NUFFT centre being at ``N // 2``. Voxel size
+    and direction are unchanged.
+    """
     affine = get_affine_helper(scan, reco_id, decimals=decimals, **kwargs)
     if affine is None:
         return None
     options = getattr(scan, "_sordino_options", None) or _build_options(kwargs)
-    ext_factors = options.ext_factors
-    spatial_shape = getattr(scan, "_sordino_spatial_shape", None)
-    if spatial_shape is None:
-        try:
-            recon_info = _parse_recon_info(scan)
-            spatial_shape = tuple(parse_volume_shape(recon_info, options))
-            setattr(scan, "_sordino_spatial_shape", spatial_shape)
-        except Exception:
-            spatial_shape = None
-    if spatial_shape is None:
+    if np.allclose(np.asarray(options.ext_factors, dtype=float), 1.0):
+        return affine
+    try:
+        recon_info = _parse_recon_info(scan)
+        shift = _ext_factor_shift(recon_info, options)
+    except Exception as exc:  # header without Matrix/orientation: keep the brkraw affine
+        logger.warning("Sordino hook: ext_factors affine shift not applied (%s).", exc)
         return affine
     affine_list = list(affine) if isinstance(affine, tuple) else [affine]
-    new_affine_list = []
-    for aff in affine_list:
-        scaled_affine = _apply_ext_factor_affine(aff, tuple(spatial_shape[:3]), ext_factors)
-        new_affine_list.append(scaled_affine)
+    new_affine_list = [_apply_ext_factor_affine(aff, shift) for aff in affine_list]
     if isinstance(affine, tuple):
         return tuple(new_affine_list)
     return new_affine_list[0]
@@ -680,16 +683,25 @@ def _calc_slope_inter(data: np.ndarray) -> Tuple[np.ndarray, float, float]:
     return converted.squeeze(), slope, inter
 
 
-def _apply_ext_factor_affine(affine: np.ndarray, shape: Tuple[int, int, int], ext_factors: Tuple[float, float, float]) -> np.ndarray:
-    factors = np.asarray(ext_factors, dtype=float)
-    if np.allclose(factors, 1.0):
+def _ext_factor_shift(recon_info: Dict[str, Any], options: Options) -> Tuple[int, int, int]:
+    """Origin shift in whole voxels per output axis for ``options.ext_factors``.
+
+    Sizes are whole voxels (``int(Matrix * ext_factors)``, as reconstructed), taken in
+    reconstruction order and moved to output order with ``orientation.axis_order``.
+    """
+    base_options = replace(options, ext_factors=(1.0, 1.0, 1.0))
+    base = [int(n) for n in parse_volume_shape(recon_info, base_options)]
+    scaled = [int(n) for n in parse_volume_shape(recon_info, options)]
+    order = orientation_axis_order(recon_info)
+    return cast(Tuple[int, int, int],
+                tuple(-(scaled[order[j]] // 2 - base[order[j]] // 2) for j in range(3)))
+
+
+def _apply_ext_factor_affine(affine: np.ndarray, shift: Tuple[int, int, int]) -> np.ndarray:
+    if not any(shift):
         return affine
-    scaled_matrix = np.asarray(shape, dtype=float)
-    base_matrix = scaled_matrix / factors
-    center = (base_matrix - 1.0) / 2.0
-    origin = center - (scaled_matrix - 1.0) / 2.0
-    updated = affine.copy()
-    updated[:, 3] = updated.dot(origin.tolist() + [1.0])
+    updated = np.asarray(affine, dtype=float).copy()
+    updated[:, 3] = updated.dot([float(v) for v in shift] + [1.0])
     return updated
 
 

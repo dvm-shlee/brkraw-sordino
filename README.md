@@ -76,7 +76,26 @@ Notes:
 
 Supported keys:
 
-- `ext_factors`: scalar or 3-item sequence (default: 1.0)
+- `ext_factors`: scalar or 3-item sequence (default: 1.0). Enlarges the
+  reconstruction grid, and so the field of view, at the same voxel size: axis `i`
+  gets `int(Matrix[i] * ext_factors[i])` voxels (16 x 1.5 -> 24, 16 x 1.1 -> 17).
+  The three values follow the **read/phase/slice acquisition order** of
+  `PVM_Matrix` (the reconstruction axes): index 0 = read, 1 = phase, 2 = slice.
+  They are not anatomical axes and not the axes of the output array: the hook
+  reorders the axes after reconstruction, so the anatomical direction each index
+  widens depends on the scan (slice orientation, read direction, subject type and
+  position). Measured example, two approved coronal scans (readout `H_F`,
+  Quadruped, `Head_Supine`, written in brkraw's default `subject_ras`): index 0
+  (read, along the bore, which is the animal's posterior-anterior axis for a
+  quadruped lying head first) widens posterior-anterior, index 1 (phase)
+  left-right, index 2 (slice, vertical in the magnet) inferior-superior; the output array holds index 1 on its axis 0
+  and index 0 on its axis 1. Check the mapping of your own protocol once (for
+  example with `[1.5, 1, 1]` and a look at which side grew) before relying on it.
+  A scalar or three equal values widen every axis, so the order does not matter
+  for them.
+  Naming caution: "RPS" is sometimes used for read/phase/slice, but in
+  neuroimaging RPS is also an orientation code (Right-Posterior-Superior). The
+  order here is the acquisition order, never an anatomical code.
 - `ignore_samples`: int (default: 1)
 - `offset`: int (default: 0)
 - `num_frames`: int or null (default: None)
@@ -154,7 +173,16 @@ is ignored with a one-line warning.
   and in the recon cache `.json`. With `estimate_k0`, `scan._sordino_recon_meta["k0"]` and the
   cache `.json` also hold the estimated K0 (`[real, imag]` per channel, for every frame).
 - Converted NIfTI outputs apply slope/intercept scaling for uint16 storage.
-- `ext_factors` scales the affine around the FOV center during conversion.
+- `ext_factors` keeps every object where it was: the affine keeps the voxel size and
+  direction and moves the origin by `-(N // 2 - N0 // 2)` voxels on each output axis
+  (`N` the extended size, `N0` the size at 1.0; the adjoint NUFFT puts the grid centre at
+  index `N // 2` for odd and even sizes). When `N` and `N0` differ in parity the extra voxel
+  sits on one side, so the FOV centre moves by half a voxel while the objects do not.
+  Before this fix, a factor other than 1 on index 0 or 1 moved the image when the output
+  reorders those axes (measured: 1.6 mm on a 16^3 scan, 10 mm on a 60^3 scan), and a size
+  that is not a whole multiple (or an odd matrix) gave a sub-voxel shift (16 x 1.1: 0.3 mm).
+  `ext_factors=1` is unchanged, and the reconstruction and its cache key are unchanged
+  for every value.
 - Multi-channel data defaults to merged channels; set `split_ch=true` to keep channels split.
 - When `split_ch=false`, magnitude uses RSS while complex uses coherent sum.
 - Orientation is normalized when the first 3D axes are spatial; see `notebooks/orientation.ipynb`.
