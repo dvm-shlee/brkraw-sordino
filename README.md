@@ -151,7 +151,12 @@ cache and are not part of the cache key):
   The reconstruction frees each frame's
   memory before the next (`gc.collect()`), so this share does not grow with the
   number of frames (v1 64^3 scan: about 0.3 GiB; before this, a 900-frame run
-  peaked at 4.2 GiB).
+  peaked at 4.2 GiB). It grows with the samples per frame (NPro x NPoints, and
+  NPoints includes the readout oversampling) and with the receivers: a 160^3
+  scan with NPro 80892, NPoints 640 (OverSampling 8), 2 receivers and
+  `estimate_k0` is estimated at 38.5 GiB; the same geometry measured 27.3 GiB
+  (synthetic FID, macOS). The estimate is at or above every measurement, by
+  3 % to 55 %.
 
 `brkraw_sordino.get_dataobj_info(scan, reco_id, **options)` returns the same
 estimate without reading data (shape, dtype and count of the returned arrays,

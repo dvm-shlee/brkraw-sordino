@@ -29,9 +29,12 @@ GIB = 1024 ** 3
 DEFAULT_FRACTION = 0.5
 FALLBACK_LIMIT_BYTES = 4 * GIB
 MIB = 1024 ** 2
-#: Reconstruction working memory model (WI-0071, D-0098 2), fitted to synthetic
-#: reconstructions with gc.collect() after every frame (13 shapes, at or above
-#: every measured peak, 0 to +18 %).
+#: Reconstruction working memory model (WI-0071, D-0098 2), fitted to reconstructions
+#: with gc.collect() after every frame: 21 synthetic shapes up to 128^3 and 6.6 M
+#: samples per frame, 1-16 receivers, and 2 real v1 runs. Checked again in WI-0095
+#: at 160^3 with 51.8 M samples per frame (NPoints 640, OverSampling 8), 1-4
+#: receivers, with and without estimate_k0. At or above every measured peak RSS,
+#: +3 % to +55 % (pinned in tests/test_recon_memory_measured.py).
 RECON_TRAJ_FACTOR = 6.0       # x trajectory bytes (3 float64 per sample)
 RECON_KSPACE_FACTOR = 12.0    # x one frame of complex128 k-space, all channels
 RECON_GRID_FACTOR = 1.1       # x one NUFFT grid (2x oversampled per axis, complex128)
