@@ -590,6 +590,9 @@ def get_dataobj(
         )
     else:
         logger.debug("Using cached recon file: %s", img_cache_path)
+        if options.estimate_k0:
+            logger.info("Reading the recon cache reconstructed with estimate_k0 "
+                        "(k-space centre estimated).")
 
     if cached_shape is None:
         cached_shape = list(get_dataobj_shape(recon_info, options))
