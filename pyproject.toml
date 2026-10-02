@@ -16,6 +16,7 @@ dependencies = [
   "brkraw",
   "numpy",
   "scipy",
+  "finufft",
   "mri-nufft[finufft]"
 ]
 

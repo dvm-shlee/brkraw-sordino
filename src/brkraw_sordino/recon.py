@@ -191,20 +191,32 @@ def _same_samples(nufft_op, omega) -> bool:
     return bool(np.allclose(samples, omega, rtol=0.0, atol=1e-6))
 
 
-def phase_correction_factor(recon_info: Dict[str, Any], options: Options,
-                            n_points: int) -> Optional[np.ndarray]:
-    """Per-projection accumulated phase of the ramped gradient (WI-0056).
+class PhaseRows:
+    """``phase_correction_factor`` rows computed on demand (WI-0097).
 
-    The receiver frequency of projection i is ACQ_O1_list[i], set for the
-    target vector g(i); while the gradient still moves from g(i-1), spins at
-    the FOV offset collect phi_ij = 2*pi*(O1[i-1] - O1[i]) * tau_j, with
-    tau_j the integral of (1 - ramp fraction) from the phase reference (RF
-    centre) to sample j (timing.ramp_terms). Returns exp(-1j*phi) with shape
-    (n_pro, n_points), or None when no correction applies: correct_ramptime
-    off, no FOV offset (O1 list of length 1), or a constant gradient (general
-    ZTE). The phase correction is part of ``correct_ramptime`` (BRK-0066).
-    The sign follows the phase observed on v2 data (WI-0056 run 3).
+    ``rows[lo:hi]`` (or an index array) equals ``phase_correction_factor(...)[lo:hi]``
+    bit for bit: the same expression on the selected projections only, so the
+    whole (n_pro, n_points) factor is never held.
     """
+
+    def __init__(self, step_hz: np.ndarray, tau_s: np.ndarray):
+        self._d = np.asarray(step_hz, dtype=float)
+        self._tau = np.asarray(tau_s, dtype=float)
+
+    @property
+    def shape(self) -> tuple:
+        return (int(self._d.size), int(self._tau.size))
+
+    def __len__(self) -> int:
+        return int(self._d.size)
+
+    def __getitem__(self, idx) -> np.ndarray:
+        return np.exp(-2j * np.pi * np.outer(self._d[idx], self._tau)).astype(np.complex64)
+
+
+def phase_correction_rows(recon_info: Dict[str, Any], options: Options,
+                          n_points: int) -> Optional[PhaseRows]:
+    """``phase_correction_factor`` as ``PhaseRows``, or None when no correction applies."""
     from . import timing as timing_mod
 
     if not getattr(options, "correct_ramptime", True):
@@ -226,7 +238,26 @@ def phase_correction_factor(recon_info: Dict[str, Any], options: Options,
         return None
     d = np.roll(o1, 1) - o1
     logger.debug(" - Phase correction: version %s, max |step| %.1f Hz", seq.version, np.abs(d).max())
-    return np.exp(-2j * np.pi * np.outer(d, tau_s)).astype(np.complex64)
+    return PhaseRows(d, tau_s)
+
+
+def phase_correction_factor(recon_info: Dict[str, Any], options: Options,
+                            n_points: int) -> Optional[np.ndarray]:
+    """Per-projection accumulated phase of the ramped gradient (WI-0056).
+
+    The receiver frequency of projection i is ACQ_O1_list[i], set for the
+    target vector g(i); while the gradient still moves from g(i-1), spins at
+    the FOV offset collect phi_ij = 2*pi*(O1[i-1] - O1[i]) * tau_j, with
+    tau_j the integral of (1 - ramp fraction) from the phase reference (RF
+    centre) to sample j (timing.ramp_terms). Returns exp(-1j*phi) with shape
+    (n_pro, n_points), or None when no correction applies: correct_ramptime
+    off, no FOV offset (O1 list of length 1), or a constant gradient (general
+    ZTE). The phase correction is part of ``correct_ramptime`` (BRK-0066).
+    The sign follows the phase observed on v2 data (WI-0056 run 3). The
+    reconstruction uses ``phase_correction_rows`` (the same values per range).
+    """
+    rows = phase_correction_rows(recon_info, options, n_points)
+    return None if rows is None else rows[:]
 
 
 def correct_offreso(kspace: np.ndarray, shift_freq: float, *, eff_bandwidth: float, over_sampling: float) -> np.ndarray:
@@ -249,154 +280,198 @@ def recon_dataobj(fid_fobj,
                   override_dtype=None,
                   phase_factor=None,
                   virtual_traj=None,
-                  k0_out=None):
+                  k0_out=None,
+                  chunk_spokes=None):
     """Reconstruct image volumes from FID data and write to an output file.
 
+    Each frame is reconstructed in contiguous spoke chunks (WI-0097, D-0133):
+    a chunk's FID bytes, trajectory rows and phase rows are made, its adjoint
+    NUFFT is added to the frame image for every channel, and the chunk is
+    released, so the working memory is one chunk plus the image grids
+    (``memguard.recon_plan``). The result equals the whole-scan adjoint
+    (``nufft_adjoint``) up to the summation order (tests/test_serial_recon.py).
+
     Args:
-        fid_fobj (IO[bytes]): Input FID file handle.
-        traj (np.ndarray): K-space trajectory array.
+        fid_fobj (IO[bytes]): Input FID file handle (read forward only after
+            the first seek).
+        traj: ``traj.TrajectoryRows`` (the hook) or a whole (n_pro, N, 3)
+            trajectory array.
         recon_info (Dict[str, Any]): Reconstruction metadata.
         img_fobj (IO[bytes]): Output image file handle.
         options (Options): Reconstruction options.
         override_buffer_size (Optional[int]): Override FID frame buffer size.
         override_dtype (Optional[np.dtype]): Override FID dtype.
-        phase_factor (Optional[np.ndarray]): (n_pro, n_points) factor from
-            ``phase_correction_factor``, applied to every frame and channel.
+        phase_factor: ``PhaseRows`` from ``phase_correction_rows`` or the
+            (n_pro, n_points) array from ``phase_correction_factor``, applied
+            to every frame and channel.
         virtual_traj (Optional[np.ndarray]): (n_pro, M, 3) leading positions
             from ``kcentre.leading_points``; when given (``estimate_k0``), the
             centre is estimated and filled for every frame and channel
             (``kcentre.fill_centre``) instead of the plain adjoint.
         k0_out (Optional[list]): with ``virtual_traj``, one list per frame is
             appended, holding the estimated K0 (complex) of each channel.
+        chunk_spokes (Optional[int]): largest chunk in spokes (the hook takes it
+            from the memory limit); None plans it from the sample cap alone.
 
     Returns:
         np.dtype: Dtype of the reconstructed output volumes.
     """
+    from . import memguard, serial
+
     logger.debug("Processing reconstruction")
     img_fobj.seek(0)
     fid_shape, fid_dtype = parse_fid_info(recon_info)
     volume_shape = parse_volume_shape(recon_info, options)
-    
+
     offset = getattr(options, 'offset') or 0
     num_frames = get_num_frames(recon_info, options)
     ignore_samples = getattr(options, 'ignore_samples') or 1
 
-    if all(arg != None for arg in [override_buffer_size, override_buffer_size]):
+    if override_buffer_size is not None and override_dtype is not None:
         logger.debug(" - Use override buffer size and dtype")
         fid_fobj.seek(0)
-        buffer_size = override_buffer_size
-        fid_dtype = override_dtype
+        buffer_size = int(override_buffer_size)
+        fid_dtype = np.dtype(override_dtype)
     else:
         buffer_size = int(np.prod(fid_shape) * fid_dtype.itemsize)
         buf_offset = offset * buffer_size
         fid_fobj.seek(buf_offset)
-    
-    trimmed_traj = traj[:, ignore_samples:, ...]
-    logger.debug(" - Reconstruction traj shape: %s", trimmed_traj.shape)
-    
-    dtype = None
+
+    n_points, n_receivers, n_pro = (int(v) for v in fid_shape[1:])
+    spoke_bytes = 2 * n_points * n_receivers * np.dtype(fid_dtype).itemsize
+    if buffer_size != spoke_bytes * n_pro:
+        raise ValueError(f"FID frame of {buffer_size} bytes does not hold {n_pro} spokes "
+                         f"of {spoke_bytes} bytes")
+    rows = _row_source(traj)
+    traj_spokes = int(traj.n_pro) if hasattr(traj, "n_pro") else int(np.shape(traj)[0])
+    if traj_spokes != n_pro:
+        raise ValueError(f"trajectory has {traj_spokes} spokes, the FID has {n_pro}")
+    if chunk_spokes is None:
+        chunk_spokes = memguard.recon_plan(n_pro, n_points, n_receivers, volume_shape,
+                                           estimate_k0=virtual_traj is not None)["chunk_spokes"]
+    ranges = serial.spoke_ranges(n_pro, chunk_spokes)
+    logger.debug(" - Reconstruction: %s spokes x %s samples in %s chunk(s) of up to %s spokes",
+                 n_pro, n_points - ignore_samples, len(ranges), ranges[0][1] - ranges[0][0])
+
     offreso_freqs = getattr(options, "offreso_freqs", None)
     eff_bandwidth = recon_info.get("EffBandwidth_Hz")
     over_sampling = recon_info.get("OverSampling")
 
+    def _offreso(ch):
+        if (isinstance(offreso_freqs, tuple) and len(offreso_freqs) > ch
+                and eff_bandwidth is not None and over_sampling is not None):
+            return offreso_freqs[ch]
+        return None
+
+    # the density weight is normalised by its maximum over ALL spokes (as the
+    # whole-scan adjoint does), so the maximum is found before the first chunk
+    dmax = 0.0
+    for lo, hi in ranges:
+        dmax = max(dmax, float(serial.density(rows(lo, hi)[:, ignore_samples:]).max()))
+    nf = serial.norm_factor(volume_shape)
+
     if virtual_traj is not None:
         from .kcentre import fill_centre
 
-    def _image(k, frame, frame_k0):
-        if virtual_traj is None:
-            return nufft_adjoint(k, trimmed_traj, volume_shape, frame)
-        img, info = fill_centre(k, trimmed_traj, virtual_traj, volume_shape)
-        frame_k0.append(info["k0"])
-        return img
-
+    dtype = None
+    reuse = len(ranges) == 1          # one chunk: points and weights stay set for every frame
+    adj = None
     for n in progressbar(range(num_frames), desc='frames', ncols=100):
         frame_k0: list = []
-        buffer = fid_fobj.read(buffer_size)
-        vol = np.frombuffer(buffer, dtype=fid_dtype).reshape(fid_shape, order='F')
-        vol = (vol[0] + 1j * vol[1])[np.newaxis, ...]
-        k_full = vol.squeeze().T
-        if phase_factor is not None:
-            # (n_pro, n_points) single channel or (n_pro, n_rx, n_points)
-            k_full = k_full * (phase_factor if k_full.ndim == 2 else phase_factor[:, None, :])
-        k_space = k_full[..., ignore_samples:]
+        if n == 0:
+            logger.debug(" - %s reconstruction",
+                         "Multi-channel" if n_receivers > 1 else "Single-channel")
+            for ch in range(n_receivers):
+                freq = _offreso(ch)
+                if freq is not None:
+                    if n_receivers > 1:
+                        logger.info(" - Correcting off-resonance: ch=%s, freq=%.6f Hz", ch, freq)
+                    else:
+                        logger.info(" - Correcting off-resonance: freq=%.6f Hz", freq)
+        acc = np.zeros((n_receivers,) + tuple(volume_shape), dtype=np.complex128)
+        whole_k = [] if virtual_traj is not None else None
+        if adj is None or not reuse:
+            adj = serial.Adjoint(volume_shape)
+        for lo, hi in ranges:
+            k = _read_chunk(fid_fobj, spoke_bytes * (hi - lo), fid_dtype,
+                            (2, n_points, n_receivers, hi - lo))
+            if phase_factor is not None:
+                k = k * phase_factor[lo:hi][:, None, :]
+            k = k[..., ignore_samples:]
+            for ch in range(n_receivers):
+                freq = _offreso(ch)
+                if freq is not None:
+                    k[:, ch, :] = correct_offreso(k[:, ch, :], freq, eff_bandwidth=eff_bandwidth,
+                                                  over_sampling=over_sampling)
+            if whole_k is not None:
+                whole_k.append(k)          # stage 1: estimate_k0 still solves on the whole scan
+                continue
+            if not reuse or adj.n_points == 0:
+                tr = rows(lo, hi)[:, ignore_samples:]
+                w = serial.density(tr) / dmax
+                adj.setpts(tr)
+                del tr
+            for ch in range(n_receivers):
+                adj.add(acc[ch], k[:, ch, :].reshape(-1) * w)
+            del k
+        if whole_k is not None:
+            kk = np.concatenate(whole_k, axis=0)
+            del whole_k
+            trimmed_traj = rows(0, n_pro)[:, ignore_samples:]
+            for ch in range(n_receivers):
+                img, info = fill_centre(kk[:, ch, :], trimmed_traj, virtual_traj, volume_shape)
+                acc[ch] = img
+                frame_k0.append(info["k0"])
+            del kk, trimmed_traj
+        else:
+            acc /= nf
         rss_gb = _get_current_rss_gb()
-        if rss_gb is None:
-            logger.debug(" - Reconstruction k-space shape: %s", k_space.shape)
-        else:
-            logger.debug(
-                " - Reconstruction k-space shape: %s (RSS %.2f GB)",
-                k_space.shape,
-                rss_gb,
-            )
-        n_receivers = fid_shape[2]
-
-        if n_receivers > 1:
-            if n == 0:
-                logger.debug(" - Multi-channel reconstruction")
-            recon_vol = []
-            for ch_id in range(n_receivers):
-                if n == 0:
-                    logger.debug(" - Channel: %s", ch_id)
-                _k_space = k_space[:, ch_id, :]
-                apply_offreso = offreso_freqs is not None and len(offreso_freqs) > ch_id
-                
-                if (
-                    apply_offreso
-                    and isinstance(offreso_freqs, tuple)
-                    and eff_bandwidth is not None
-                    and over_sampling is not None
-                ):
-                    offreso_freq = offreso_freqs[ch_id]
-                    if n == 0:
-                        logger.info(
-                            " - Correcting off-resonance: ch=%s, freq=%.6f Hz",
-                            ch_id,
-                            offreso_freq,
-                        )
-                    _k_space = correct_offreso(
-                        _k_space,
-                        offreso_freq,
-                        eff_bandwidth=eff_bandwidth,
-                        over_sampling=over_sampling,
-                    )
-                _vol = _image(_k_space, n, frame_k0)
-                recon_vol.append(_vol)
-            recon_vol = np.stack(recon_vol, axis=0)
-        else:
-            if n == 0:
-                logger.debug(" - Single-channel reconstruction")
-            if (
-                isinstance(offreso_freqs, tuple)
-                and len(offreso_freqs) > 0
-                and eff_bandwidth is not None
-                and over_sampling is not None
-            ):
-                offreso_freq = offreso_freqs[0]
-                if n == 0:
-                    logger.info(
-                        " - Correcting off-resonance: freq=%.6f Hz",
-                        offreso_freq,
-                    )
-                k_space = correct_offreso(
-                    k_space,
-                    offreso_freq,
-                    eff_bandwidth=eff_bandwidth,
-                    over_sampling=over_sampling,
-                )
-            recon_vol = _image(k_space, n, frame_k0)
+        if rss_gb is not None:
+            logger.debug(" - Frame %s reconstructed (RSS %.2f GB)", n, rss_gb)
         if k0_out is not None and virtual_traj is not None:
             k0_out.append(frame_k0)
+        recon_vol = acc if n_receivers > 1 else acc[0]
         if n == 0:
             dtype = recon_vol.dtype
-        img_fobj.write(recon_vol.T.flatten(order="C").tobytes())
-        # Free the frame's garbage now (WI-0071, D-0098 2): without this, unreachable
-        # reference cycles of the NUFFT step pile up between collections and the
-        # reconstruction peak grows with the frame count (300 v1 frames: 2369 MiB
-        # without, 455 MiB with, about 12 % more time).
-        del recon_vol, vol, k_full, k_space
+        img_fobj.write(np.ascontiguousarray(recon_vol.T).tobytes())
+        if not reuse:
+            adj = None
+        # Free the frame's garbage now (WI-0071, D-0098 2); chunk arrays are released as
+        # each chunk ends, so the working memory is one chunk, not one frame (WI-0097).
+        del recon_vol, acc
         gc.collect()
     logger.debug("done")
     return dtype
+
+
+def _row_source(traj):
+    """``rows(lo, hi)``: untrimmed trajectory rows from a ``TrajectoryRows`` or an array."""
+    if hasattr(traj, "rows"):
+        return traj.rows
+    arr = np.asarray(traj)
+    return lambda lo, hi: arr[lo:hi]
+
+
+def _read_chunk(fid_fobj, nbytes: int, dtype, shape) -> np.ndarray:
+    """``nbytes`` from the FID stream as complex k-space (spokes, receivers, points)."""
+    buf = fid_fobj.read(nbytes)
+    if len(buf) < nbytes:
+        parts = [buf]
+        got = len(buf)
+        while got < nbytes:
+            more = fid_fobj.read(nbytes - got)
+            if not more:
+                break
+            parts.append(more)
+            got += len(more)
+        buf = b"".join(parts)
+    if len(buf) != nbytes:
+        raise ValueError(f"FID data ended early: {len(buf)} of {nbytes} bytes")
+    vol = np.frombuffer(buf, dtype=dtype).reshape(shape, order="F")
+    k = np.empty(vol.shape[1:], dtype=np.complex128, order="F")
+    k.real = vol[0]
+    k.imag = vol[1]
+    return k.T                                   # (spokes, receivers, points), C order
 
 __all__ = [
     'recon_dataobj',

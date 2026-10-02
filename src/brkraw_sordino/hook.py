@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 from .typing import Options
 from .boolopt import parse_bool
 from . import kcentre
-from .traj import get_trajectory
+from .traj import get_trajectory, trajectory_rows  # noqa: F401  (get_trajectory: tests patch it)
 from .recon import (
     build_recon_cache_path,
     get_dataobj_shape,
@@ -37,7 +37,7 @@ from .spoketiming import (
 )
 from .orientation import axis_order as orientation_axis_order
 from .orientation import correct as correct_orientation
-from .recon import phase_correction_factor
+from .recon import phase_correction_factor, phase_correction_rows  # noqa: F401
 from .timing import TIMING_TUNING
 
 FileIO = Union[DatasetFile, ZippedFile]
@@ -365,12 +365,22 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
     # Reconstruction step (D-0098 2): runs first in the same process when no cache
     # exists; with gc after every frame its working memory does not grow with the
     # frame count. Added to the read estimate (conservative: the two are not at their
-    # peaks at the same time).
+    # peaks at the same time). The serial reconstruction (WI-0097, D-0133 1 and 4)
+    # takes what the limit leaves after the read as its budget and picks the chunk
+    # size from it, so the limit sets the chunk size instead of stopping a large scan.
+    limit = memguard.memory_limit_bytes(max_memory_gb)
+    read_nbytes = nbytes + 3 * frame_bytes
     recon_share = 0
+    chunk_spokes = None
+    n_chunks = None
     if not cached:
-        recon_share = memguard.recon_nbytes(
+        budget = int(limit["limit_nbytes"]) - read_nbytes
+        plan = memguard.recon_plan(
             int(recon_info["NPro"]), int(recon_info["NPoints"]), n_ch, vol,
-            estimate_k0=bool(options.estimate_k0), spoketiming_nbytes=stc_stage_nbytes)
+            estimate_k0=bool(options.estimate_k0), budget_nbytes=budget)
+        recon_share = max(plan["recon_nbytes"], int(stc_stage_nbytes))
+        chunk_spokes = plan["chunk_spokes"]
+        n_chunks = plan["n_chunks"]
     info: Dict[str, Any] = {
         "shape": shape,
         "dtype": real_dt.str,
@@ -383,12 +393,14 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
         "cache_dir": str(options.cache_dir),
         "cache_dtype": cdt.str,
         "cache_nbytes": cache_nbytes,
-        "peak_nbytes": nbytes + 3 * frame_bytes + recon_share,
+        "peak_nbytes": read_nbytes + recon_share,
         "recon_nbytes": recon_share,
+        "recon_chunk_spokes": chunk_spokes,
+        "recon_chunks": n_chunks,
         "disk_nbytes": disk_nbytes,
         "disk_free_nbytes": None if cached else memguard.free_disk_bytes(Path(options.cache_dir)),
     }
-    info.update(memguard.memory_limit_bytes(max_memory_gb))
+    info.update(limit)
     return info
 
 
@@ -497,9 +509,12 @@ def get_dataobj(
 
     if cached_dtype is None or cached_shape is None:
         with fid_entry.open() as fid_fobj:
-            traj = get_trajectory(recon_info, options)
-            phase_factor = phase_correction_factor(
+            # per-chunk trajectory and phase rows (WI-0097): no whole trajectory, no
+            # trajectory cache file, no whole phase factor
+            traj = trajectory_rows(recon_info, options)
+            phase_factor = phase_correction_rows(
                 recon_info, options, int(parse_fid_info(recon_info)[0][1]))
+            chunk_spokes = info.get("recon_chunk_spokes")
             virtual_traj = None
             k0_frames: list = []
             if options.estimate_k0:
@@ -567,12 +582,14 @@ def get_dataobj(
                             phase_factor=phase_factor,
                             virtual_traj=virtual_traj,
                             k0_out=k0_frames,
+                            chunk_spokes=chunk_spokes,
                         )
                 else:
                     logger.debug("Spoketiming correction disabled.")
                     dtype = recon_dataobj(fid_fobj, traj, recon_info, img_fobj, options,
                                           phase_factor=phase_factor,
-                                          virtual_traj=virtual_traj, k0_out=k0_frames)
+                                          virtual_traj=virtual_traj, k0_out=k0_frames,
+                                          chunk_spokes=chunk_spokes)
             os.replace(img_temp_path, img_cache_path)
         if options.estimate_k0:
             recon_meta["k0"] = [[[float(k.real), float(k.imag)] for k in frame] for frame in k0_frames]

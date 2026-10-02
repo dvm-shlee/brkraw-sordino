@@ -341,9 +341,56 @@ def _save_trajectory(path: Path, traj: np.ndarray) -> None:
         raise
 
 
-def get_trajectory(recon_info: Dict[str, Any],
-                   options: Options) -> np.ndarray:
+class TrajectoryRows:
+    """Trajectory of any spoke range, computed on demand (WI-0097, D-0133).
 
+    Holds only the per-spoke gradient vectors and the per-sample terms, so the
+    whole (n_pro, N, 3) trajectory is never built and no trajectory cache is
+    written. ``rows(lo, hi)`` equals ``get_trajectory(...)[lo:hi]`` bit for bit:
+    it is the same expression as ``calc_radial_traj3d_integral`` (or
+    ``calc_radial_traj3d`` with ``correct_ramptime=false``) on the selected
+    spokes only. Spoke i needs g(i-1); ``g_prev`` is the rolled list, so a range
+    that starts inside the list still sees the vector of the spoke before it.
+    """
+
+    def __init__(self, grad: np.ndarray, n_samples: int, formula: str, **terms: Any):
+        g = np.asarray(grad, dtype=float)
+        self.n_pro = int(g.shape[1])
+        self.n_samples = int(n_samples)
+        self.formula = formula
+        if formula == "integral":
+            n = self.n_samples
+            self._unit = 1.0 / (n - 1) / 2.0
+            self._t = np.asarray(terms["times_us"], dtype=float) / terms["dwell_us"]
+            self._f = np.asarray(terms["ramp_integral_us"], dtype=float) / terms["dwell_us"]
+            if len(self._t) != n or len(self._f) != n:
+                raise ValueError("times and ramp integral must have one value per sample")
+            self._g_prev = np.roll(g, 1, axis=1).T              # (n_pro, 3)
+            self._delta = g.T - self._g_prev
+        elif formula == "fixed":
+            off = terms.get("traj_offset") or 0
+            n = self.n_samples
+            self._samp = ((np.arange(n, dtype=float) + off) / (n - 1)) / 2.0
+            self._gT = g.T
+        else:
+            raise ValueError(f"unknown trajectory formula {formula!r}")
+
+    @property
+    def shape(self) -> tuple:
+        return (self.n_pro, self.n_samples, 3)
+
+    def rows(self, lo: int, hi: int) -> np.ndarray:
+        """(hi - lo, N, 3) float64 trajectory of spokes lo .. hi - 1."""
+        if self.formula == "integral":
+            gp = self._g_prev[lo:hi]
+            de = self._delta[lo:hi]
+            return self._unit * (self._t[None, :, None] * gp[:, None, :]
+                                 + self._f[None, :, None] * de[:, None, :])
+        return self._samp[None, :, None] * self._gT[lo:hi, None, :]
+
+
+def _trajectory_inputs(recon_info: Dict[str, Any], options: Options) -> Dict[str, Any]:
+    """Gradient list, cache-key fields and per-sample terms of the chosen formula."""
     correct_ramptime = bool(getattr(options, "correct_ramptime", True))
 
     sample_size = int(recon_info['Matrix'][0])
@@ -365,19 +412,21 @@ def get_trajectory(recon_info: Dict[str, Any],
     grad_params = {"matrix_size": sample_size, "npro_target": npro,
                    "half_sphere": half_acquisition, "use_origin": use_origin,
                    "reorder": reorder}
-
-    use_integral = correct_ramptime
-    if use_integral:
+    out: Dict[str, Any] = {"grad": grad, "grad_params": grad_params, "n_samples": n_samples,
+                           "sample_size": sample_size, "npro": npro,
+                           "over_sampling": over_sampling}
+    if correct_ramptime:
         from . import timing as timing_mod
 
         seq = timing_mod.read_timing(recon_info)
         tune = timing_mod.tuning_for(seq.version)
         times_us, f_us, _ = timing_mod.ramp_terms(seq, tune, n_samples)
         logger.debug(" + Ramp model: integral, %s", timing_mod.describe(seq, tune))
-        model = {"formula": "integral",
-                 "times_us": [float(v) for v in times_us],
-                 "ramp_integral_us": [float(v) for v in f_us],
-                 "dwell_us": float(seq.dwell_us)}
+        out["model"] = {"formula": "integral",
+                        "times_us": [float(v) for v in times_us],
+                        "ramp_integral_us": [float(v) for v in f_us],
+                        "dwell_us": float(seq.dwell_us)}
+        out["terms"] = {"times_us": times_us, "ramp_integral_us": f_us, "dwell_us": seq.dwell_us}
         # BRK-0059/BRK-0060: the unsampled centre is a property of the
         # sequence and the user has nothing to do about it, so it is logged
         # (info for a general ZTE gap over 1 k-grid unit, debug otherwise),
@@ -393,9 +442,37 @@ def get_trajectory(recon_info: Dict[str, Any],
             logger.debug(" + k-space centre gap: %s", gap)
     else:
         offset_factor = float(traj_offset * (10 ** -6) * eff_bandwidth * over_sampling)
-        model = {"formula": "fixed", "traj_offset_samples": offset_factor}
+        out["model"] = {"formula": "fixed", "traj_offset_samples": offset_factor}
+        out["terms"] = {"traj_offset": offset_factor}
+    return out
 
-    digest = trajectory_cache_key(grad_params, n_samples, model)
+
+def trajectory_rows(recon_info: Dict[str, Any], options: Options) -> TrajectoryRows:
+    """The trajectory of ``get_trajectory`` as a ``TrajectoryRows`` (nothing saved)."""
+    inp = _trajectory_inputs(recon_info, options)
+    rows = TrajectoryRows(inp["grad"], inp["n_samples"], inp["model"]["formula"], **inp["terms"])
+    logger.debug(" + Trajectory rows (%s formula), %s spokes x %s samples",
+                 rows.formula, rows.n_pro, rows.n_samples)
+    return rows
+
+
+def get_trajectory(recon_info: Dict[str, Any],
+                   options: Options) -> np.ndarray:
+    """Whole (n_pro, N, 3) trajectory, saved in the trajectory cache.
+
+    The reconstruction uses ``trajectory_rows`` (WI-0097); this function stays
+    for the tools and as the reference the rows are tested against.
+    """
+    inp = _trajectory_inputs(recon_info, options)
+    grad = inp["grad"]
+    sample_size = inp["sample_size"]
+    npro = inp["npro"]
+    over_sampling = inp["over_sampling"]
+    n_samples = inp["n_samples"]
+    model = inp["model"]
+    use_integral = model["formula"] == "integral"
+
+    digest = trajectory_cache_key(inp["grad_params"], n_samples, model)
     traj_path = Path(options.cache_dir) / f"traj_{digest}.npy"
     expected_shape = (int(grad.shape[1]), n_samples, 3)
     traj = _load_cached_trajectory(traj_path, expected_shape)
@@ -404,14 +481,18 @@ def get_trajectory(recon_info: Dict[str, Any],
         return traj
     logger.info("Computing trajectory (matrix=%s, n_pro=%s).", sample_size, npro)
     if use_integral:
+        t = inp["terms"]
         traj = calc_radial_traj3d_integral(
-            grad, sample_size, over_sampling, times_us, f_us, seq.dwell_us)
+            grad, sample_size, over_sampling, t["times_us"], t["ramp_integral_us"], t["dwell_us"])
     else:
-        traj = calc_radial_traj3d(grad, sample_size, over_sampling, offset_factor)
+        traj = calc_radial_traj3d(grad, sample_size, over_sampling, inp["terms"]["traj_offset"])
     _save_trajectory(traj_path, traj)
     logger.debug("Saved trajectory cache: %s", traj_path)
     return traj
 
+
 __all__ = [
-    'get_trajectory'
+    'get_trajectory',
+    'trajectory_rows',
+    'TrajectoryRows',
 ]

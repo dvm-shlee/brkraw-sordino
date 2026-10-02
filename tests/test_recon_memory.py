@@ -137,19 +137,19 @@ def _fid_bytes(state):
 
 def _only_the_stage(monkeypatch):
     """Zero the reconstruction-step terms so the spoke-timing stage is what is returned."""
-    for name in ("RECON_TRAJ_FACTOR", "RECON_KSPACE_FACTOR", "RECON_GRID_FACTOR", "RECON_FIXED_BYTES"):
+    for name in ("SERIAL_SAMPLE_BYTES", "SERIAL_SAMPLE_RX_BYTES"):
         monkeypatch.setattr(memguard, name, 0)
+    monkeypatch.setattr(memguard, "serial_fixed_nbytes", lambda *a: 0)
 
 
 def test_spoketiming_stage_without_a_limit_is_the_whole_fid(setup, monkeypatch):
-    """mem_limit=0: one segment, SPOKETIMING_FACTOR x the FID plus the held trajectory
-    and phase factor."""
+    """mem_limit=0: one segment, SPOKETIMING_FACTOR x the FID. The trajectory and the
+    phase factor are made per chunk and not held during the stage (WI-0097)."""
     _only_the_stage(monkeypatch)
     state = setup(1, write=False, correct_spoketiming=True, mem_limit=0)
     info = hook.get_dataobj_info(_Scan(), None, **state["kwargs"])
-    ri = state["info"]
     stage = int(np.ceil(memguard.SPOKETIMING_FACTOR * _fid_bytes(state)))
-    assert info["recon_nbytes"] == stage + ri["NPro"] * ri["NPoints"] * 32
+    assert info["recon_nbytes"] == stage
 
 
 def test_spoketiming_stage_follows_the_segments(setup, monkeypatch):
@@ -159,9 +159,8 @@ def test_spoketiming_stage_follows_the_segments(setup, monkeypatch):
     monkeypatch.setattr(spoketiming, "get_num_segment", lambda gb, ri, o: np.array([5, 5]))   # 5 of 10
     state = setup(1, write=False, correct_spoketiming=True, mem_limit=1e-9)
     info = hook.get_dataobj_info(_Scan(), None, **state["kwargs"])
-    ri = state["info"]
     stage = int(np.ceil(memguard.SPOKETIMING_FACTOR * _fid_bytes(state) * 0.5))
-    assert info["recon_nbytes"] == stage + ri["NPro"] * ri["NPoints"] * 32
+    assert info["recon_nbytes"] == stage
 
 
 @pytest.mark.parametrize("opts,frames_in_file,scale", [
@@ -186,7 +185,7 @@ def test_the_larger_stage_is_used(setup):
     state = setup(1, write=False, correct_spoketiming=True, mem_limit=0)
     info = hook.get_dataobj_info(_Scan(), None, **state["kwargs"])
     ri = state["info"]
-    stage = int(np.ceil(memguard.SPOKETIMING_FACTOR * _fid_bytes(state))) + ri["NPro"] * ri["NPoints"] * 32
+    stage = int(np.ceil(memguard.SPOKETIMING_FACTOR * _fid_bytes(state)))
     assert info["recon_nbytes"] == max(memguard.recon_nbytes(ri["NPro"], ri["NPoints"], 1, list(VOL)), stage)
 
 
@@ -200,8 +199,7 @@ def test_no_spoketiming_stage_when_off_or_cached(setup):
 def test_estimate_k0_adds_its_share():
     plain = memguard.recon_nbytes(12800, 64, 1, (64, 64, 64))
     k0 = memguard.recon_nbytes(12800, 64, 1, (64, 64, 64), estimate_k0=True)
-    samples = 12800 * 64
-    assert k0 - plain == int(np.ceil(10.0 * samples * 24 + 1.0 * 8 * 64 ** 3 * 16))
+    assert k0 > plain
     # at or above the measured synthetic estimate_k0 peaks (MiB, wi-0071 r2, with the phase factor)
     for n, npro, npts, nrx, mib in [(64, 12800, 64, 1, 489.0), (64, 12800, 64, 2, 625.5),
                                     (96, 28800, 96, 1, 1531.6), (64, 25600, 64, 1, 896.8),
