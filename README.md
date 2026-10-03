@@ -110,7 +110,8 @@ Supported keys:
   Timing values and adjustments are declared in `timing.py`.
 - `estimate_k0`: bool (default: false). Estimates the k-space centre samples
   that the dead time leaves unmeasured, by a least-squares image (one FOV
-  grid, 10 conjugate-gradient iterations), and adds them to the adjoint
+  grid, 10 conjugate-gradient iterations, solved on grids so that its memory
+  does not grow with the samples), and adds them to the adjoint
   reconstruction. SORDINO v1-v3 only; on a general ZTE it is ignored with an
   info message. It stops with an error when `correct_ramptime` is false. It
   changes the image noticeably, no ground truth exists yet, and it makes the
@@ -144,19 +145,22 @@ cache and are not part of the cache key):
   that would pass, for example `{"max_memory_gb": 1.8}`; the brkraw CLI uses it
   to ask "Proceed anyway?" in a terminal. The estimate covers the returned
   arrays and the read buffers, and, when no cache exists, the reconstruction
-  step that runs first in the same process (`recon_nbytes`: one frame's
-  trajectory, k-space and NUFFT grid, fitted to measurements, plus the
-  least-squares solve with `estimate_k0`; with spoke-timing correction, the
-  larger of that and 5 x one FID segment, whose size follows `mem_limit`).
-  The reconstruction frees each frame's
-  memory before the next (`gc.collect()`), so this share does not grow with the
-  number of frames (v1 64^3 scan: about 0.3 GiB; before this, a 900-frame run
-  peaked at 4.2 GiB). It grows with the samples per frame (NPro x NPoints, and
-  NPoints includes the readout oversampling) and with the receivers: a 160^3
-  scan with NPro 80892, NPoints 640 (OverSampling 8), 2 receivers and
-  `estimate_k0` is estimated at 38.5 GiB; the same geometry measured 27.3 GiB
-  (synthetic FID, macOS). The estimate is at or above every measurement, by
-  3 % to 55 %.
+  step that runs first in the same process (`recon_nbytes`). The
+  reconstruction goes through each frame in contiguous chunks of spokes (at
+  most about 13 M samples each), so its memory is a fixed part (the image of
+  every receiver and one NUFFT grid; with `estimate_k0` also the grids of its
+  least-squares solve, about 1 KiB per output voxel) plus one chunk, and does
+  not grow with the number of spokes or frames. What the limit leaves after
+  the read buffers sets the chunk size; the check stops only when even a
+  256-spoke chunk does not fit. With spoke-timing correction the estimate is
+  the larger of that and 5 x one FID segment, whose size follows `mem_limit`.
+  Example: a 160^3 scan with NPro 80876, NPoints 640 (OverSampling 8) and 2
+  receivers (synthetic FID, macOS, default limit) measured 3.0 GiB (estimate
+  4.1 GiB; 18.9 GiB before the chunked reconstruction), and 4.9 GiB with
+  `estimate_k0` (estimate 8.1 GiB; 27.3 GiB before). On an 8 GB computer
+  (4 GiB limit) the plain reconstruction fits with smaller chunks; with
+  `estimate_k0` it stops and offers a limit of 5.3 GB. The estimate is at or
+  above every measurement, by up to 2 x.
 
 `brkraw_sordino.get_dataobj_info(scan, reco_id, **options)` returns the same
 estimate without reading data (shape, dtype and count of the returned arrays,

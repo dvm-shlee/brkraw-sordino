@@ -364,14 +364,28 @@ def recon_dataobj(fid_fobj,
         return None
 
     # the density weight is normalised by its maximum over ALL spokes (as the
-    # whole-scan adjoint does), so the maximum is found before the first chunk
+    # whole-scan adjoint does), so the maximum is found before the first chunk.
+    # With estimate_k0 the same pass accumulates the convolution kernel of the
+    # least-squares normal operator (once for all frames and channels), and the
+    # maximum also covers the virtual leading samples, as kcentre.fill_centre's
+    # final adjoint over [virtual, measured] does.
+    kernel = None
+    if virtual_traj is not None:
+        from .kcentre import N_ITER
+        kernel = serial.ToeplitzKernel(volume_shape)
     dmax = 0.0
     for lo, hi in ranges:
-        dmax = max(dmax, float(serial.density(rows(lo, hi)[:, ignore_samples:]).max()))
-    nf = serial.norm_factor(volume_shape)
-
+        tr = rows(lo, hi)[:, ignore_samples:]
+        d = serial.density(tr)
+        dmax = max(dmax, float(d.max()))
+        if kernel is not None:
+            kernel.add(tr, d)                  # raw |k|^2; scaled by 1 / dmax below
+        del tr, d
     if virtual_traj is not None:
-        from .kcentre import fill_centre
+        dmax = max(dmax, float(serial.density(virtual_traj).max()))
+        kernel.finish(1.0 / dmax)
+        w_virtual = serial.density(virtual_traj) / dmax
+    nf = serial.norm_factor(volume_shape)
 
     dtype = None
     reuse = len(ranges) == 1          # one chunk: points and weights stay set for every frame
@@ -389,7 +403,6 @@ def recon_dataobj(fid_fobj,
                     else:
                         logger.info(" - Correcting off-resonance: freq=%.6f Hz", freq)
         acc = np.zeros((n_receivers,) + tuple(volume_shape), dtype=np.complex128)
-        whole_k = [] if virtual_traj is not None else None
         if adj is None or not reuse:
             adj = serial.Adjoint(volume_shape)
         for lo, hi in ranges:
@@ -403,28 +416,33 @@ def recon_dataobj(fid_fobj,
                 if freq is not None:
                     k[:, ch, :] = correct_offreso(k[:, ch, :], freq, eff_bandwidth=eff_bandwidth,
                                                   over_sampling=over_sampling)
-            if whole_k is not None:
-                whole_k.append(k)          # stage 1: estimate_k0 still solves on the whole scan
-                continue
             if not reuse or adj.n_points == 0:
                 tr = rows(lo, hi)[:, ignore_samples:]
-                w = serial.density(tr) / dmax
+                w = serial.density(tr) / dmax      # kept for every frame when reuse
                 adj.setpts(tr)
                 del tr
             for ch in range(n_receivers):
                 adj.add(acc[ch], k[:, ch, :].reshape(-1) * w)
             del k
-        if whole_k is not None:
-            kk = np.concatenate(whole_k, axis=0)
-            del whole_k
-            trimmed_traj = rows(0, n_pro)[:, ignore_samples:]
+        if kernel is not None:
+            # estimate_k0 (kcentre.fill_centre, WI-0097 stage 2): acc[ch] is the raw
+            # A^H W y; solve A^H W A x = A^H W y by CG on the Toeplitz form, K0 = A_0 x =
+            # sum(x), predict the virtual samples A_v x and add their adjoint. The raw x
+            # is the product's iterate divided by nf, so the predictions are the same.
+            if not reuse:
+                adj = None                     # its NUFFT grid is not needed during the solve
+            preds = []
             for ch in range(n_receivers):
-                img, info = fill_centre(kk[:, ch, :], trimmed_traj, virtual_traj, volume_shape)
-                acc[ch] = img
-                frame_k0.append(info["k0"])
-            del kk, trimmed_traj
-        else:
-            acc /= nf
+                x, _ = serial.conjugate_gradient(kernel.normal, acc[ch], N_ITER)
+                frame_k0.append(complex(x.sum()))
+                preds.append(serial.forward(x, virtual_traj))
+                del x
+            vadj = serial.Adjoint(volume_shape)
+            vadj.setpts(virtual_traj)
+            for ch in range(n_receivers):
+                vadj.add(acc[ch], preds[ch] * w_virtual)
+            del vadj, preds
+        acc /= nf
         rss_gb = _get_current_rss_gb()
         if rss_gb is not None:
             logger.debug(" - Frame %s reconstructed (RSS %.2f GB)", n, rss_gb)

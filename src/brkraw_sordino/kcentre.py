@@ -21,6 +21,12 @@ iterations); every measured sample enters as in the plain adjoint. K0, the
 estimated signal at k = 0, is one value per volume and channel (all spokes
 cross k = 0), the least-squares image's forward value there.
 
+The product reconstruction (``recon.recon_dataobj``, WI-0097) computes the same
+three steps chunk by chunk: the normal operator ``A^H W A`` is applied as a
+convolution on a 2N grid (``serial.ToeplitzKernel``), so no step holds all
+samples. ``fill_centre`` stays as the whole-array reference that the tests
+(``tests/test_serial_recon.py``) compare it with.
+
 The grid factor and the iteration count are fixed on purpose (BRK-0066: the
 option is an on/off switch). Development history and the comparison with
 other centre estimates: ``tools/eval_timing_centre.py`` (WI-0058), which keeps

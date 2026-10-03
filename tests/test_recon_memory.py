@@ -197,14 +197,14 @@ def test_no_spoketiming_stage_when_off_or_cached(setup):
 
 
 def test_estimate_k0_adds_its_share():
-    plain = memguard.recon_nbytes(12800, 64, 1, (64, 64, 64))
-    k0 = memguard.recon_nbytes(12800, 64, 1, (64, 64, 64), estimate_k0=True)
-    assert k0 > plain
-    # at or above the measured synthetic estimate_k0 peaks (MiB, wi-0071 r2, with the phase factor)
-    for n, npro, npts, nrx, mib in [(64, 12800, 64, 1, 489.0), (64, 12800, 64, 2, 625.5),
-                                    (96, 28800, 96, 1, 1531.6), (64, 25600, 64, 1, 896.8),
-                                    (128, 12800, 64, 1, 906.7)]:
-        assert memguard.recon_nbytes(npro, npts, nrx, (n, n, n), estimate_k0=True) >= mib * 2 ** 20
+    """The Toeplitz solve (WI-0097 stage 2) adds a grid-only part: the same for any spoke,
+    sample or receiver count; the measured rows are pinned in test_recon_memory_measured."""
+    for npro, npts, nrx in [(12800, 64, 1), (25600, 64, 2), (80876, 640, 4)]:
+        plain = memguard.recon_nbytes(npro, npts, nrx, (64, 64, 64))
+        k0 = memguard.recon_nbytes(npro, npts, nrx, (64, 64, 64), estimate_k0=True)
+        assert k0 - plain == memguard.k0_fixed_nbytes((64, 64, 64))
+    assert memguard.k0_fixed_nbytes((128, 128, 128)) - memguard.k0_fixed_nbytes((64, 64, 64)) \
+        == memguard.K0_VOXEL_BYTES * (128 ** 3 - 64 ** 3)
 
 
 def test_estimate_k0_option_reaches_the_estimate(setup, monkeypatch):

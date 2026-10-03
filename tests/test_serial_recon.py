@@ -33,6 +33,10 @@ N_POINTS = int(MATRIX / 2 * OS)
 N_PRO = 2 * calc_npro(MATRIX, 1.0)
 PLAIN_TOL = 1e-9          # double precision NUFFT, only the summation order differs
 K0_IMG_TOL = 1e-6         # the 366f5fc solve runs its NUFFTs in complex64
+#: K0 is one number per frame and channel, the sum of the least-squares image: the
+#: complex64 rounding of the 366f5fc solve (relative 6e-8 per value) accumulates over
+#: the 10 CG steps and the sum over all voxels, so one value is held to 10 x the image
+#: tolerance (gate 1 note, wi-0097-choi-2). Measured at 160^3: 3e-8 relative.
 K0_VAL_TOL = 1e-5
 
 
@@ -146,7 +150,7 @@ def _setup(tmp_path, n_rx, n_frames, phase=True, k0=False, **opts):
 
 
 #: estimate_k0 cases of part 2 (the Toeplitz solve is stage 2 of WI-0097)
-STAGE_K0 = [False]
+STAGE_K0 = [False, True]
 CHUNKS = [None, N_PRO, math.ceil(N_PRO / 3), 7]
 CHUNK_IDS = ["default", "one", "three", "spokes7"]
 

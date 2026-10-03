@@ -12,9 +12,11 @@ no cache exists, the reconstruction runs first in the same process and
 ``recon_nbytes`` is added (D-0098 2). The reconstruction is serial (WI-0097,
 D-0133): each frame is cut into spoke chunks, so its working memory is a fixed
 part (image grids) plus one chunk, independent of the spoke and frame counts
-(``recon_plan``). What the limit leaves after the read is the budget that sets
-the chunk size; the check stops only when even the smallest chunk does not fit.
-The two parts are added although they do not peak at the same time (conservative).
+(``recon_plan``); ``estimate_k0`` adds a grid-only part for its Toeplitz solve
+(``k0_fixed_nbytes``, WI-0097 stage 2). What the limit leaves after the read is
+the budget that sets the chunk size; the check stops only when even the
+smallest chunk does not fit. The read and reconstruction parts are added
+although they do not peak at the same time (conservative).
 
 Limit: the ``max_memory_gb`` option, otherwise half of this computer's
 physical memory (4 GB when it cannot be read; D-0098 4).
@@ -31,20 +33,8 @@ GIB = 1024 ** 3
 DEFAULT_FRACTION = 0.5
 FALLBACK_LIMIT_BYTES = 4 * GIB
 MIB = 1024 ** 2
-#: Reconstruction working memory model (WI-0071, D-0098 2), fitted to reconstructions
-#: with gc.collect() after every frame: 21 synthetic shapes up to 128^3 and 6.6 M
-#: samples per frame, 1-16 receivers, and 2 real v1 runs. Checked again in WI-0095
-#: at 160^3 with 51.8 M samples per frame (NPoints 640, OverSampling 8), 1-4
-#: receivers, with and without estimate_k0. At or above every measured peak RSS,
-#: +3 % to +55 % (pinned in tests/test_recon_memory_measured.py).
-RECON_TRAJ_FACTOR = 6.0       # x trajectory bytes (3 float64 per sample)
-RECON_KSPACE_FACTOR = 12.0    # x one frame of complex128 k-space, all channels
-RECON_GRID_FACTOR = 1.1       # x one NUFFT grid (2x oversampled per axis, complex128)
+#: Interpreter-side fixed allowance of the reconstruction step (WI-0071).
 RECON_FIXED_BYTES = 16 * MIB
-#: estimate_k0 adds a least-squares solve per frame and channel (kcentre.fill_centre):
-#: measured +9.1 x trajectory + 0.8 x grid on 5 synthetic shapes (after wi-0071-choi-4 F4).
-RECON_K0_TRAJ_FACTOR = 10.0
-RECON_K0_GRID_FACTOR = 1.0
 #: Serial reconstruction (WI-0097, D-0133; design WI-0096): chunk cap in samples
 #: (about 13 M; larger chunks did not save time at 160^3), the smallest chunk tried
 #: when the limit is tight, and the per-sample bytes of one chunk (WI-0096 fit on 29
@@ -53,6 +43,15 @@ CHUNK_SAMPLES_CAP = 13_000_000
 MIN_CHUNK_SPOKES = 256
 SERIAL_SAMPLE_BYTES = 120
 SERIAL_SAMPLE_RX_BYTES = 60
+#: estimate_k0 with the Toeplitz solve (WI-0097 stage 2, D-0133 1): grids only, no samples.
+#: Counted per output voxel (complex128 = 16 B; the 2N grid has 8 voxels per voxel): the
+#: kernel on 2N (128 B), its NUFFT fine grid at upsampling 1.25 (250 B), the real kernel
+#: FFT (64 B), three 2N FFT buffers of one CG step (384 B), five CG vectors (80 B); 906 B,
+#: rounded up to 1024 B although the kernel and CG buffers do not coexist (conservative).
+#: Plus a fixed part for the extra FFT and NUFFT plans. Fitted against 34 measured rows
+#: (32^3 to 160^3, 1-16 receivers, tests/test_recon_memory_measured.py).
+K0_VOXEL_BYTES = 1024
+K0_FIXED_BYTES = 64 * MIB
 #: Spoke-timing correction works on one FID segment of all selected frames at a time:
 #: measured 4.1 x the segment (real v1, 30 frames, one segment); 5.0 keeps a margin.
 SPOKETIMING_FACTOR = 5.0
@@ -128,16 +127,12 @@ def chunk_nbytes(chunk_spokes, n_points, n_receivers) -> int:
     return int(math.ceil(samples * (SERIAL_SAMPLE_BYTES + int(n_receivers) * SERIAL_SAMPLE_RX_BYTES)))
 
 
-def _whole_scan_k0_nbytes(n_pro, n_points, n_receivers, vol) -> int:
-    """estimate_k0 until stage 2 of WI-0097: the centre is still solved on the whole scan
-    (366f5fc model, WI-0071/WI-0095)."""
-    samples = n_pro * n_points
-    traj = samples * 3 * 8
-    kspace = samples * n_receivers * 16
-    grid = 8 * vol[0] * vol[1] * vol[2] * 16
-    est = int(math.ceil(RECON_TRAJ_FACTOR * traj + RECON_KSPACE_FACTOR * kspace
-                        + RECON_GRID_FACTOR * grid)) + RECON_FIXED_BYTES
-    return est + int(math.ceil(RECON_K0_TRAJ_FACTOR * traj + RECON_K0_GRID_FACTOR * grid))
+def k0_fixed_nbytes(volume_shape) -> int:
+    """Extra chunk-independent memory of estimate_k0 (Toeplitz solve, WI-0097 stage 2):
+    independent of the spoke, sample and receiver counts (the solve runs one channel at
+    a time on grids; the kernel is shared by all channels and frames)."""
+    vox = int(volume_shape[0]) * int(volume_shape[1]) * int(volume_shape[2])
+    return K0_VOXEL_BYTES * vox + K0_FIXED_BYTES
 
 
 def recon_plan(n_pro, n_points, n_receivers, volume_shape, *, estimate_k0=False,
@@ -159,25 +154,19 @@ def recon_plan(n_pro, n_points, n_receivers, volume_shape, *, estimate_k0=False,
     n_pro, n_points, n_receivers, vol = _check_sizes(n_pro, n_points, n_receivers, volume_shape)
     cap = max(1, CHUNK_SAMPLES_CAP // n_points)
     smallest = min(MIN_CHUNK_SPOKES, n_pro)
+    fixed = serial_fixed_nbytes(n_receivers, vol)
     if estimate_k0:
-        chunk = min(n_pro, cap)
-        fixed = 0
-    else:
-        fixed = serial_fixed_nbytes(n_receivers, vol)
-        chunk = min(n_pro, cap)
-        per_spoke = chunk_nbytes(1, n_points, n_receivers)
-        if budget_nbytes is not None and per_spoke > 0:
-            room = int(budget_nbytes) - fixed
-            chunk = min(chunk, max(room // per_spoke, 0))
-            chunk = max(chunk, smallest)
+        fixed += k0_fixed_nbytes(vol)
+    chunk = min(n_pro, cap)
+    per_spoke = chunk_nbytes(1, n_points, n_receivers)
+    if budget_nbytes is not None and per_spoke > 0:
+        room = int(budget_nbytes) - fixed
+        chunk = min(chunk, max(room // per_spoke, 0))
+        chunk = max(chunk, smallest)
     n_chunks = -(-n_pro // chunk)
     chunk = -(-n_pro // n_chunks)                       # equal chunks
     part = chunk_nbytes(chunk, n_points, n_receivers)
-    if estimate_k0:
-        total = _whole_scan_k0_nbytes(n_pro, n_points, n_receivers, vol)
-        part = total
-    else:
-        total = fixed + part
+    total = fixed + part
     fits = budget_nbytes is None or total <= int(budget_nbytes)
     return {"chunk_spokes": int(chunk), "n_chunks": int(n_chunks),
             "chunk_samples": int(chunk * n_points), "fixed_nbytes": int(fixed),
@@ -244,5 +233,6 @@ def check(info: Dict[str, Any]) -> None:
 
 __all__ = [
     "SordinoResourceError", "physical_memory_bytes", "memory_limit_bytes",
-    "recon_plan", "recon_nbytes", "serial_fixed_nbytes", "chunk_nbytes", "free_disk_bytes", "check",
+    "recon_plan", "recon_nbytes", "serial_fixed_nbytes", "chunk_nbytes", "k0_fixed_nbytes",
+    "free_disk_bytes", "check",
 ]

@@ -80,4 +80,99 @@ class Adjoint:
         out += self.plan.execute(c).reshape(self.shape)
 
 
-__all__ = ["NUFFT_EPS", "norm_factor", "spoke_ranges", "omega_columns", "density", "Adjoint"]
+#: Upsampling of the kernel NUFFT on the 2N grid (WI-0096: 1.25 used 4.60 GiB and 10.4 s
+#: against 8.39 GiB and 15.3 s for 2.0, with a smaller K0 error).
+KERNEL_UPSAMPFAC = 1.25
+
+
+class ToeplitzKernel:
+    """The normal operator A^H W A of the estimate_k0 solve as a convolution (WI-0097 stage 2).
+
+    (A^H W A x)(n) = sum_m T(n - m) x(m) with T(d) = sum_j w_j exp(i omega_j . d) for
+    d in [-(N-1), N-1] (A^H: type 1, sign +1; A: type 2, sign -1, as finufft's and
+    mrinufft's defaults). T is a type-1 NUFFT of the weights onto the 2N grid, a sum
+    over samples, so it is accumulated chunk by chunk and does not depend on the
+    channel or the frame. The circulant embedding c = ifftshift(T) (index d mod 2N)
+    makes every normal-operator step two FFTs of size 2N per axis; the crop to
+    [0, N) uses only |d| <= N - 1. FFT(c) is kept as its real part: c is Hermitian
+    except on the d = -N planes, which no cropped output uses, so the real part (the
+    FFT of the Hermitian average) gives the same cropped result in half the memory
+    (WI-0096 design note 6). References: Wajer and Pruessmann, ISMRM 2001; Fessler et
+    al., IEEE TSP 53(9), 2005.
+    """
+
+    def __init__(self, shape: Sequence[int]):
+        self.shape = tuple(int(s) for s in shape)
+        self.big = tuple(2 * s for s in self.shape)
+        self._adj = Adjoint(self.big, upsampfac=KERNEL_UPSAMPFAC)
+        self._t = np.zeros(self.big, dtype=np.complex128)
+        self.chat = None
+
+    def add(self, traj: np.ndarray, weight: np.ndarray) -> None:
+        """Add the samples at ``traj`` with real weights ``weight`` (flat)."""
+        self._adj.setpts(traj)
+        self._adj.add(self._t, weight)
+
+    def finish(self, scale: float = 1.0) -> None:
+        """Scale the accumulated kernel and keep the real part of its FFT."""
+        import scipy.fft as sfft
+
+        self._adj = None                      # release the NUFFT plan and its grid first
+        c = np.fft.ifftshift(self._t)
+        self._t = None
+        if scale != 1.0:
+            c *= scale
+        f = sfft.fftn(c, workers=-1, overwrite_x=True)
+        del c
+        self.chat = np.ascontiguousarray(f.real)
+        del f
+
+    def normal(self, x: np.ndarray) -> np.ndarray:
+        """A^H W A x (raw sums, no ``norm_factor``) for x on the N grid."""
+        import scipy.fft as sfft
+
+        xp = np.zeros(self.big, dtype=np.complex128)
+        xp[tuple(slice(0, s) for s in self.shape)] = x
+        f = sfft.fftn(xp, workers=-1, overwrite_x=True)
+        del xp
+        f *= self.chat
+        y = sfft.ifftn(f, workers=-1, overwrite_x=True)
+        del f
+        return np.ascontiguousarray(y[tuple(slice(0, s) for s in self.shape)])
+
+
+def conjugate_gradient(normal, b: np.ndarray, n_iter: int):
+    """``kcentre.least_squares_image``'s CG loop (x0 = 0, same stop rule), complex128."""
+    x = np.zeros_like(b)
+    r = b.copy()
+    p = r.copy()
+    rs = np.vdot(r, r).real
+    hist = [float(np.sqrt(rs))]
+    for _ in range(int(n_iter)):
+        ap = normal(p)
+        alpha = rs / max(np.vdot(p, ap).real, 1e-300)
+        x += alpha * p
+        r -= alpha * ap
+        del ap
+        rs_new = np.vdot(r, r).real
+        hist.append(float(np.sqrt(rs_new)))
+        if rs_new <= 1e-24 * hist[0] ** 2:
+            break
+        p *= rs_new / rs
+        p += r
+        rs = rs_new
+    return x, hist
+
+
+def forward(x: np.ndarray, traj: np.ndarray) -> np.ndarray:
+    """Type-2 NUFFT of ``x`` (image grid) at ``traj`` (raw, no ``norm_factor``), flat."""
+    cols = omega_columns(traj)
+    plan = finufft.Plan(2, tuple(x.shape), n_trans=1, eps=NUFFT_EPS, dtype="complex128")
+    plan.setpts(*cols)
+    out = plan.execute(np.ascontiguousarray(x, dtype=np.complex128))
+    del plan
+    return out
+
+
+__all__ = ["NUFFT_EPS", "KERNEL_UPSAMPFAC", "norm_factor", "spoke_ranges", "omega_columns",
+           "density", "Adjoint", "ToeplitzKernel", "conjugate_gradient", "forward"]
