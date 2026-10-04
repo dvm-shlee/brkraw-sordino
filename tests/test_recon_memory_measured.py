@@ -120,6 +120,8 @@ MEASURED = [
     ("recon", 96, 28796, 96, 4, "samples", None, 0, 944095232, "WI-0099 small_n96_p28800_s96_rx4_samples_ph0"),
     ("recon", 96, 28796, 96, 4, "samples", None, 0, 1141456896, "WI-0099 small_n96_p28800_s96_rx4_samples_ph1"),
     ("recon", 96, 28796, 96, 4, "toeplitz", None, 0, 1505345536, "WI-0099 small_n96_p28800_s96_rx4_toeplitz_ph1"),
+    ("recon", 160, 12800, 640, 1, "samples", None, 0, 2362802176, "WI-0099 edge_n160_p12800_s640_rx1_samples_ph0"),
+    ("recon", 160, 12800, 640, 1, "toeplitz", None, 0, 4817403904, "WI-0099 edge_n160_p12800_s640_rx1_toeplitz_ph0"),
 ]
 
 

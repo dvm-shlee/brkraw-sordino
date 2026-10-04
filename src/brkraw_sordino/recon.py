@@ -316,7 +316,8 @@ def recon_dataobj(fid_fobj,
         k0_method (Optional[str]): with ``virtual_traj``, the least-squares solve:
             None picks it by the memory estimates (``memguard.k0_method``: the
             sample solve when it halves the estimate, WI-0099, D-0143); ``"toeplitz"`` or
-            ``"samples"`` forces one (tests and measurements).
+            ``"samples"`` uses that one (the hook passes the planner's choice, which also
+            knows the memory limit, D-0147; tests and measurements).
 
     Returns:
         np.dtype: Dtype of the reconstructed output volumes.
@@ -391,7 +392,7 @@ def recon_dataobj(fid_fobj,
         logger.info("estimate_k0: %s solve%s (reconstruction estimate: samples %.2f GiB, "
                     "Toeplitz %.2f GiB, ratio %.2f; samples when <= %.2f).",
                     "sample-based" if method == "samples" else "Toeplitz",
-                    "" if k0_method is None else " (forced)",
+                    "" if k0_method is None else " (given)",
                     choice["samples_total_nbytes"] / memguard.GIB,
                     choice["toeplitz_total_nbytes"] / memguard.GIB, choice["ratio"],
                     memguard.K0_SAMPLES_MAX_FRACTION)

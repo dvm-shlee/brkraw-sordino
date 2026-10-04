@@ -500,8 +500,8 @@ def test_recon_uses_and_logs_the_chosen_solve(tmp_path, monkeypatch, caplog, cho
 
     real = memguard.k0_method
 
-    def pick(*a):
-        res = dict(real(*a))
+    def pick(*a, **kw):
+        res = dict(real(*a, **kw))
         res["method"] = chosen
         return res
 
@@ -531,3 +531,86 @@ def test_unknown_k0_method_is_refused(tmp_path):
     with pytest.raises(ValueError, match="k0_method"):
         recon_dataobj(io.BytesIO(frames[0]), traj, info, io.BytesIO(), options, phase_factor=factor,
                       virtual_traj=vt, k0_out=[], k0_method="cg")
+
+
+# ----------------------------------------------------------------------------- part 4
+#: D-0147: when the rule picks Toeplitz but Toeplitz does not fit the budget and the sample
+#: solve does, the sample solve is used (estimates; 160^3, 12,800 x 640, 1 rx, 4 GiB budget:
+#: Toeplitz smallest chunk ~4.68 GiB, samples ~1.83 GiB, bench/edge_cases.txt).
+LIMIT_CASE = (12800, 640, 1, (160, 160, 160))
+
+
+def test_k0_method_falls_back_to_samples_when_only_they_fit():
+    from brkraw_sordino import memguard
+
+    npro, npts, rx, vol = LIMIT_CASE
+    assert memguard.k0_method(npro, npts, rx, vol)["method"] == "toeplitz"          # the rule
+    c = memguard.k0_method(npro, npts, rx, vol, budget_nbytes=4 * memguard.GIB)
+    assert c["method"] == "samples" and c["reason"] == "limit"
+    plan = memguard.recon_plan(npro, npts, rx, vol, estimate_k0=True, budget_nbytes=4 * memguard.GIB)
+    assert plan["k0_method"] == "samples" and plan["fits"] is True
+    assert plan["recon_nbytes"] <= 4 * memguard.GIB
+    plain = memguard.recon_plan(npro, npts, rx, vol, budget_nbytes=4 * memguard.GIB)
+    assert plan["fixed_nbytes"] - plain["fixed_nbytes"] == memguard.k0_samples_nbytes(npro, npts, vol)
+    # Toeplitz fits: the rule stands
+    big = memguard.k0_method(npro, npts, rx, vol, budget_nbytes=64 * memguard.GIB)
+    assert big["method"] == "toeplitz" and big["reason"] == "rule"
+    # neither fits: the rule's pick and its estimate, so the stop offers the Toeplitz limit
+    none = memguard.k0_method(npro, npts, rx, vol, budget_nbytes=1)
+    assert none["method"] == "toeplitz" and none["reason"] == "rule"
+    assert memguard.recon_plan(npro, npts, rx, vol, estimate_k0=True, budget_nbytes=1)["fits"] is False
+
+
+def test_fallback_only_switches_a_toeplitz_pick():
+    from brkraw_sordino import memguard
+
+    # a rule pick of samples stays samples at any budget
+    for budget in (None, 1, 4 * memguard.GIB, 64 * memguard.GIB):
+        assert memguard.k0_method(12800, 64, 1, (128,) * 3, budget_nbytes=budget)["method"] == "samples"
+    # the 160^3 fixture geometry: samples do not fit 4 GiB either -> Toeplitz (stop and retry as before)
+    assert memguard.k0_method(80876, 640, 2, (160,) * 3, budget_nbytes=4 * memguard.GIB)["method"] == "toeplitz"
+
+
+def test_hook_runs_the_planned_fallback_and_logs_it(tmp_path, monkeypatch, caplog):
+    """End to end through the hook: with the rule forced to Toeplitz (fraction 0) and a limit
+    between the two estimates, the planner picks samples, the reconstruction runs it, one INFO
+    line names the fallback, and the result equals the Toeplitz run within METHODS tolerances."""
+    import logging
+
+    from brkraw_sordino import hook, memguard
+
+    monkeypatch.setattr(memguard, "K0_SAMPLES_MAX_FRACTION", 0.0)
+    monkeypatch.setattr(hook, "_resolve_k0", lambda options, info: options)    # keep it on
+    info, options, traj, factor, frames, vt = _setup(tmp_path / "ref", 1, 1, k0=True)
+    monkeypatch.setattr(hook, "_parse_recon_info", lambda scan: dict(info))
+    monkeypatch.setattr(hook, "_get_fid_entry", lambda scan: _FidEntry(b"".join(frames)))
+    seen = []
+    real = hook.recon_dataobj
+
+    def spy(*a, **kw):
+        seen.append(kw.get("k0_method"))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(hook, "recon_dataobj", spy)
+    kw = {"cache_dir": str(tmp_path / "big"), "as_complex": True, "estimate_k0": True}
+    big_info = hook.get_dataobj_info(_Scan(), None, **kw)
+    assert big_info["recon_k0_method"] == "toeplitz"
+    big = hook.get_dataobj(_Scan(), None, **kw)
+    read_part = big_info["peak_nbytes"] - big_info["recon_nbytes"]
+    c = memguard.k0_method(N_PRO, N_POINTS, 1, SHAPE)
+    plain = memguard.recon_plan(N_PRO, N_POINTS, 1, SHAPE)
+    samples_min = plain["fixed_nbytes"] + c["samples_nbytes"] + memguard.chunk_nbytes(
+        min(memguard.MIN_CHUNK_SPOKES, N_PRO), N_POINTS, 1)
+    toeplitz_min = plain["fixed_nbytes"] + c["toeplitz_nbytes"] + memguard.chunk_nbytes(
+        min(memguard.MIN_CHUNK_SPOKES, N_PRO), N_POINTS, 1)
+    assert samples_min < toeplitz_min
+    kw = {"cache_dir": str(tmp_path / "tight"), "as_complex": True, "estimate_k0": True,
+          "max_memory_gb": (read_part + (samples_min + toeplitz_min) / 2) / memguard.GIB}
+    tight_info = hook.get_dataobj_info(_Scan(), None, **kw)
+    assert tight_info["recon_k0_method"] == "samples"
+    with caplog.at_level(logging.INFO, logger="brkraw_sordino.hook"):
+        tight = hook.get_dataobj(_Scan(), None, **kw)
+    assert seen == ["toeplitz", "samples"]
+    assert sum("does not fit" in r.getMessage() for r in caplog.records) == 1
+    a, b = np.asarray(tight), np.asarray(big)
+    assert _rel(a, b) < METHODS_IMG_TOL

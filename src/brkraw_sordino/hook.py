@@ -373,7 +373,7 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
     recon_share = 0
     chunk_spokes = None
     n_chunks = None
-    k0_solve = None
+    k0_solve = k0_reason = None
     if not cached:
         budget = int(limit["limit_nbytes"]) - read_nbytes
         plan = memguard.recon_plan(
@@ -383,6 +383,7 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
         chunk_spokes = plan["chunk_spokes"]
         n_chunks = plan["n_chunks"]
         k0_solve = plan["k0_method"]          # estimate_k0: "samples" or "toeplitz" (WI-0099, D-0143)
+        k0_reason = plan["k0_reason"]         # "limit": only the sample solve fits (D-0147)
     info: Dict[str, Any] = {
         "shape": shape,
         "dtype": real_dt.str,
@@ -400,6 +401,7 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
         "recon_chunk_spokes": chunk_spokes,
         "recon_chunks": n_chunks,
         "recon_k0_method": k0_solve,
+        "recon_k0_reason": k0_reason,
         "disk_nbytes": disk_nbytes,
         "disk_free_nbytes": None if cached else memguard.free_disk_bytes(Path(options.cache_dir)),
     }
@@ -524,6 +526,9 @@ def get_dataobj(
                 virtual_traj = kcentre.leading_points(recon_info, options.ignore_samples or 1)
                 logger.info("Estimating the k-space centre (%s virtual sample(s) per spoke).",
                             virtual_traj.shape[1])
+                if info.get("recon_k0_reason") == "limit":
+                    logger.info("estimate_k0: the Toeplitz solve does not fit the memory limit; "
+                                "using the sample-based solve, which fits (slower).")
             img_temp_path = img_cache_path.with_suffix(img_cache_path.suffix + ".partial")
             if img_temp_path.exists():
                 try:
@@ -586,13 +591,15 @@ def get_dataobj(
                             virtual_traj=virtual_traj,
                             k0_out=k0_frames,
                             chunk_spokes=chunk_spokes,
+                            k0_method=info.get("recon_k0_method"),
                         )
                 else:
                     logger.debug("Spoketiming correction disabled.")
                     dtype = recon_dataobj(fid_fobj, traj, recon_info, img_fobj, options,
                                           phase_factor=phase_factor,
                                           virtual_traj=virtual_traj, k0_out=k0_frames,
-                                          chunk_spokes=chunk_spokes)
+                                          chunk_spokes=chunk_spokes,
+                                          k0_method=info.get("recon_k0_method"))
             os.replace(img_temp_path, img_cache_path)
         if options.estimate_k0:
             recon_meta["k0"] = [[[float(k.real), float(k.imag)] for k in frame] for frame in k0_frames]

@@ -14,8 +14,9 @@ D-0133): each frame is cut into spoke chunks, so its working memory is a fixed
 part (image grids) plus one chunk, independent of the spoke and frame counts
 (``recon_plan``); ``estimate_k0`` adds the part of the solve it uses: the Toeplitz
 form, grids only (``k0_fixed_nbytes``, WI-0097 stage 2), or the sample-based form,
-which grows with the samples of a frame (``k0_samples_nbytes``), used only when it
-halves the estimate (``k0_method``, WI-0099, D-0136, D-0143). What the limit leaves after the read is
+which grows with the samples of a frame (``k0_samples_nbytes``), used when it
+halves the estimate, or when only it fits the budget (``k0_method``, WI-0099,
+D-0136, D-0143, D-0147). What the limit leaves after the read is
 the budget that sets the chunk size; the check stops only when even the
 smallest chunk does not fit. The read and reconstruction parts are added
 although they do not peak at the same time (conservative).
@@ -160,7 +161,7 @@ def k0_samples_nbytes(n_pro, n_points, volume_shape) -> int:
     return K0_SAMPLE_VOXEL_BYTES * vox + K0_SAMPLE_BYTES * samples + K0_SAMPLE_FIXED_BYTES
 
 
-def k0_method(n_pro, n_points, n_receivers, volume_shape) -> Dict[str, Any]:
+def k0_method(n_pro, n_points, n_receivers, volume_shape, *, budget_nbytes=None) -> Dict[str, Any]:
     """The estimate_k0 solve (WI-0099; rule D-0143).
 
     ``"samples"`` (``serial.SampleNormal``) when the whole reconstruction estimate with it is at
@@ -171,7 +172,12 @@ def k0_method(n_pro, n_points, n_receivers, volume_shape) -> Dict[str, Any]:
     memory limit: a scan always takes the same path. Both give the same K0 and image within the
     NUFFT tolerance (tests/test_serial_recon.py).
 
-    Returns ``method``, ``k0_nbytes`` (the chosen K0 term), ``samples_nbytes`` and
+    With ``budget_nbytes`` (the planner's budget; D-0147): when the rule picks Toeplitz, the
+    Toeplitz run does not fit the budget even with the smallest chunk and the sample run does,
+    the sample solve is used (``reason`` "limit"; otherwise "rule"). When neither fits, the
+    rule's pick stands, so the stop offers its limit as before.
+
+    Returns ``method``, ``reason``, ``k0_nbytes`` (the chosen K0 term), ``samples_nbytes`` and
     ``toeplitz_nbytes`` (the K0 terms), ``samples_total_nbytes``, ``toeplitz_total_nbytes`` and
     ``ratio`` (samples total / Toeplitz total).
     """
@@ -180,7 +186,13 @@ def k0_method(n_pro, n_points, n_receivers, volume_shape) -> Dict[str, Any]:
     toeplitz = k0_fixed_nbytes(volume_shape)
     s_total, t_total = plain + samples, plain + toeplitz
     method = "samples" if s_total <= K0_SAMPLES_MAX_FRACTION * t_total else "toeplitz"
-    return {"method": method, "k0_nbytes": int(samples if method == "samples" else toeplitz),
+    reason = "rule"
+    if budget_nbytes is not None and method == "toeplitz":
+        smallest = (serial_fixed_nbytes(n_receivers, volume_shape)
+                    + chunk_nbytes(min(MIN_CHUNK_SPOKES, int(n_pro)), n_points, n_receivers))
+        if smallest + toeplitz > int(budget_nbytes) and smallest + samples <= int(budget_nbytes):
+            method, reason = "samples", "limit"
+    return {"method": method, "reason": reason, "k0_nbytes": int(samples if method == "samples" else toeplitz),
             "samples_nbytes": int(samples), "toeplitz_nbytes": int(toeplitz),
             "samples_total_nbytes": int(s_total), "toeplitz_total_nbytes": int(t_total),
             "ratio": float(s_total) / float(t_total)}
@@ -203,16 +215,17 @@ def recon_plan(n_pro, n_points, n_receivers, volume_shape, *, estimate_k0=False,
 
     Returns ``chunk_spokes``, ``n_chunks``, ``chunk_samples``, ``fixed_nbytes``,
     ``chunk_nbytes``, ``recon_nbytes`` (the estimate), ``fits`` and ``k0_method``
-    (``"samples"``, ``"toeplitz"`` or None without ``estimate_k0``).
+    (``"samples"``, ``"toeplitz"`` or None without ``estimate_k0``) and ``k0_reason``
+    (``"rule"`` or ``"limit"``, D-0147).
     """
     n_pro, n_points, n_receivers, vol = _check_sizes(n_pro, n_points, n_receivers, volume_shape)
     cap = max(1, CHUNK_SAMPLES_CAP // n_points)
     smallest = min(MIN_CHUNK_SPOKES, n_pro)
     fixed = serial_fixed_nbytes(n_receivers, vol)
-    method = None
+    method = reason = None
     if estimate_k0:
-        k0 = k0_method(n_pro, n_points, n_receivers, vol)
-        method = k0["method"]
+        k0 = k0_method(n_pro, n_points, n_receivers, vol, budget_nbytes=budget_nbytes)
+        method, reason = k0["method"], k0["reason"]
         fixed += k0["k0_nbytes"]
     chunk = min(n_pro, cap)
     per_spoke = chunk_nbytes(1, n_points, n_receivers)
@@ -228,7 +241,7 @@ def recon_plan(n_pro, n_points, n_receivers, volume_shape, *, estimate_k0=False,
     return {"chunk_spokes": int(chunk), "n_chunks": int(n_chunks),
             "chunk_samples": int(chunk * n_points), "fixed_nbytes": int(fixed),
             "chunk_nbytes": int(part), "recon_nbytes": int(total), "fits": bool(fits),
-            "k0_method": method}
+            "k0_method": method, "k0_reason": reason}
 
 
 def recon_nbytes(n_pro, n_points, n_receivers, volume_shape, *, estimate_k0=False,

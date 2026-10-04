@@ -154,7 +154,9 @@ cache and are not part of the cache key):
   per voxel plus 80 B per sample of a frame). The grid solve is faster (1.2 to
   8 x on the measured shapes), so the sample solve is used only when it at
   most halves the whole estimate, that is when a frame has few samples for its
-  grid; an info log line names the choice. Both give the same image and K0
+  grid, or when only the sample solve fits the memory limit (for example a
+  160^3 scan with few spokes on an 8 GB computer); an info log line names the
+  choice. Both give the same image and K0
   within the NUFFT tolerance. Example: a 128^3 grid with 12,800 x 64 samples
   per frame measured 0.57 GiB with the sample solve (2.08 GiB on grids); a
   64^3 grid with the same samples keeps the grid solve (0.42 GiB, 0.2 s per
