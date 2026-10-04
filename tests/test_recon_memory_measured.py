@@ -199,7 +199,7 @@ def test_the_chosen_solve_is_the_planned_k0_term():
     checked = 0
     for row in MEASURED:
         kind, n, n_pro, n_points, n_rx, solve, chunk, read_nbytes, _, _ = row
-        if solve and chunk is None and memguard.k0_method(n_pro, n_points, (n, n, n))["method"] == solve:
+        if solve and chunk is None and memguard.k0_method(n_pro, n_points, n_rx, (n, n, n))["method"] == solve:
             assert _estimate(row) == read_nbytes + memguard.recon_nbytes(
                 n_pro, n_points, n_rx, (n, n, n), estimate_k0=True)
             checked += 1
@@ -209,8 +209,9 @@ def test_the_chosen_solve_is_the_planned_k0_term():
 def test_few_samples_on_a_large_grid_are_back_at_the_whole_scan_level():
     """WI-0097 decision 2 (D-0136, WI-0099 acceptance 3): 128^3 with 12,800 x 64 samples
     took 0.95 GB (906.7 MiB) with the whole-scan solve (WI-0071) and 2.08 GiB with the
-    Toeplitz solve; the sample-based solve is picked and measured below the WI-0071 value."""
-    assert memguard.k0_method(12800, 64, (128, 128, 128))["method"] == "samples"
+    Toeplitz solve; the sample-based solve is picked (it halves the estimate, D-0143) and
+    measured below the WI-0071 value."""
+    assert memguard.k0_method(12800, 64, 1, (128, 128, 128))["method"] == "samples"
     wi0071 = 950763520                                   # 906.71875 MiB, recon_mem_k0_128_12800_64_1_2
     rows = [r for r in MEASURED if r[1:6] == (128, 12800, 64, 1, "samples")]
     assert len(rows) >= 4 and all(r[8] < wi0071 for r in rows)

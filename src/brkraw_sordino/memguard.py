@@ -12,10 +12,10 @@ no cache exists, the reconstruction runs first in the same process and
 ``recon_nbytes`` is added (D-0098 2). The reconstruction is serial (WI-0097,
 D-0133): each frame is cut into spoke chunks, so its working memory is a fixed
 part (image grids) plus one chunk, independent of the spoke and frame counts
-(``recon_plan``); ``estimate_k0`` adds the smaller of its two solves: the Toeplitz
+(``recon_plan``); ``estimate_k0`` adds the part of the solve it uses: the Toeplitz
 form, grids only (``k0_fixed_nbytes``, WI-0097 stage 2), or the sample-based form,
-which grows with the samples of a frame (``k0_samples_nbytes``; ``k0_method``,
-WI-0099, D-0136). What the limit leaves after the read is
+which grows with the samples of a frame (``k0_samples_nbytes``), used only when it
+halves the estimate (``k0_method``, WI-0099, D-0136, D-0143). What the limit leaves after the read is
 the budget that sets the chunk size; the check stops only when even the
 smallest chunk does not fit. The read and reconstruction parts are added
 although they do not peak at the same time (conservative).
@@ -63,6 +63,10 @@ K0_FIXED_BYTES = 64 * MIB
 K0_SAMPLE_VOXEL_BYTES = 128
 K0_SAMPLE_BYTES = 80
 K0_SAMPLE_FIXED_BYTES = 16 * MIB
+#: The sample solve is 1.2-8.4 x slower than the Toeplitz solve on most shapes (WI-0099 bench),
+#: so it is used only when its whole reconstruction estimate is at most this fraction of the
+#: Toeplitz one (D-0143: "at most half"; measured shapes: 0.32-0.50 sample, 0.60-1.05 Toeplitz).
+K0_SAMPLES_MAX_FRACTION = 0.5
 #: Spoke-timing correction works on one FID segment of all selected frames at a time:
 #: measured 4.1 x the segment (real v1, 30 frames, one segment); 5.0 keeps a margin.
 SPOKETIMING_FACTOR = 5.0
@@ -156,23 +160,30 @@ def k0_samples_nbytes(n_pro, n_points, volume_shape) -> int:
     return K0_SAMPLE_VOXEL_BYTES * vox + K0_SAMPLE_BYTES * samples + K0_SAMPLE_FIXED_BYTES
 
 
-def k0_method(n_pro, n_points, volume_shape) -> Dict[str, Any]:
-    """The estimate_k0 solve with the smaller memory estimate (WI-0099, D-0136).
+def k0_method(n_pro, n_points, n_receivers, volume_shape) -> Dict[str, Any]:
+    """The estimate_k0 solve (WI-0099; rule D-0143).
 
-    ``"samples"`` (``serial.SampleNormal``) when its estimate is below the Toeplitz one
-    (``k0_fixed_nbytes``), otherwise ``"toeplitz"`` (``serial.ToeplitzKernel``; also on a
-    tie, the 858de87 behaviour). Depends only on the scan geometry, not on the memory limit
-    or the receiver count, so a scan always takes the same path; both give the same K0 and
-    image within the NUFFT tolerance (tests/test_serial_recon.py).
+    ``"samples"`` (``serial.SampleNormal``) when the whole reconstruction estimate with it is at
+    most ``K0_SAMPLES_MAX_FRACTION`` (half) of the estimate with the Toeplitz solve
+    (``k0_fixed_nbytes``); otherwise ``"toeplitz"`` (``serial.ToeplitzKernel``, faster). The
+    whole estimates are taken without a budget (the serial fixed part plus the capped chunk plus
+    the K0 term), so the choice depends only on the scan geometry and the receivers, not on the
+    memory limit: a scan always takes the same path. Both give the same K0 and image within the
+    NUFFT tolerance (tests/test_serial_recon.py).
 
-    Returns ``method``, ``k0_nbytes`` (the chosen estimate), ``samples_nbytes`` and
-    ``toeplitz_nbytes``.
+    Returns ``method``, ``k0_nbytes`` (the chosen K0 term), ``samples_nbytes`` and
+    ``toeplitz_nbytes`` (the K0 terms), ``samples_total_nbytes``, ``toeplitz_total_nbytes`` and
+    ``ratio`` (samples total / Toeplitz total).
     """
+    plain = recon_plan(n_pro, n_points, n_receivers, volume_shape)["recon_nbytes"]
     samples = k0_samples_nbytes(n_pro, n_points, volume_shape)
     toeplitz = k0_fixed_nbytes(volume_shape)
-    method = "samples" if samples < toeplitz else "toeplitz"
-    return {"method": method, "k0_nbytes": int(min(samples, toeplitz)),
-            "samples_nbytes": int(samples), "toeplitz_nbytes": int(toeplitz)}
+    s_total, t_total = plain + samples, plain + toeplitz
+    method = "samples" if s_total <= K0_SAMPLES_MAX_FRACTION * t_total else "toeplitz"
+    return {"method": method, "k0_nbytes": int(samples if method == "samples" else toeplitz),
+            "samples_nbytes": int(samples), "toeplitz_nbytes": int(toeplitz),
+            "samples_total_nbytes": int(s_total), "toeplitz_total_nbytes": int(t_total),
+            "ratio": float(s_total) / float(t_total)}
 
 
 def recon_plan(n_pro, n_points, n_receivers, volume_shape, *, estimate_k0=False,
@@ -188,7 +199,7 @@ def recon_plan(n_pro, n_points, n_receivers, volume_shape, *, estimate_k0=False,
     ``fits`` is False and the estimate is the one for that chunk (the memory check
     then stops and offers that limit). Deterministic: no seed, no measurement.
 
-    With ``estimate_k0`` the K0 term is the smaller of the two solves (``k0_method``).
+    With ``estimate_k0`` the K0 term is the one of the solve ``k0_method`` picks.
 
     Returns ``chunk_spokes``, ``n_chunks``, ``chunk_samples``, ``fixed_nbytes``,
     ``chunk_nbytes``, ``recon_nbytes`` (the estimate), ``fits`` and ``k0_method``
@@ -200,7 +211,7 @@ def recon_plan(n_pro, n_points, n_receivers, volume_shape, *, estimate_k0=False,
     fixed = serial_fixed_nbytes(n_receivers, vol)
     method = None
     if estimate_k0:
-        k0 = k0_method(n_pro, n_points, vol)
+        k0 = k0_method(n_pro, n_points, n_receivers, vol)
         method = k0["method"]
         fixed += k0["k0_nbytes"]
     chunk = min(n_pro, cap)

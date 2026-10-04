@@ -197,20 +197,23 @@ def test_no_spoketiming_stage_when_off_or_cached(setup):
 
 
 def test_estimate_k0_adds_its_share():
-    """estimate_k0 adds the smaller of its two solves (WI-0099, D-0136): the Toeplitz solve
-    (WI-0097 stage 2), a grid-only part the same for any spoke, sample or receiver count, or
-    the sample-based solve, which grows with the samples of a frame; neither depends on the
-    receivers. The measured rows are pinned in test_recon_memory_measured."""
-    vol = (64, 64, 64)
+    """estimate_k0 adds the K0 term of the solve ``memguard.k0_method`` picks (WI-0099, D-0143):
+    the Toeplitz solve (WI-0097 stage 2), a grid-only part the same for any spoke, sample or
+    receiver count, or the sample-based solve, which grows with the samples of a frame and is
+    used only when it halves the whole estimate. The measured rows are pinned in
+    test_recon_memory_measured."""
     picked = set()
-    for npro, npts, nrx in [(12800, 64, 1), (25600, 64, 2), (80876, 640, 4)]:
+    for vol, npro, npts, nrx in [((64,) * 3, 12800, 64, 1), ((64,) * 3, 25600, 64, 2),
+                                 ((64,) * 3, 80876, 640, 4), ((128,) * 3, 12800, 64, 1)]:
         plain = memguard.recon_nbytes(npro, npts, nrx, vol)
         k0 = memguard.recon_nbytes(npro, npts, nrx, vol, estimate_k0=True)
-        toeplitz = memguard.k0_fixed_nbytes(vol)
-        samples = memguard.k0_samples_nbytes(npro, npts, vol)
-        assert k0 - plain == min(toeplitz, samples) == memguard.k0_method(npro, npts, vol)["k0_nbytes"]
-        picked.add(memguard.k0_method(npro, npts, vol)["method"])
+        choice = memguard.k0_method(npro, npts, nrx, vol)
+        term = (memguard.k0_samples_nbytes(npro, npts, vol) if choice["method"] == "samples"
+                else memguard.k0_fixed_nbytes(vol))
+        assert k0 - plain == term == choice["k0_nbytes"]
+        picked.add(choice["method"])
     assert picked == {"samples", "toeplitz"}
+    vol = (64, 64, 64)
     assert memguard.k0_fixed_nbytes((128, 128, 128)) - memguard.k0_fixed_nbytes((64, 64, 64)) \
         == memguard.K0_VOXEL_BYTES * (128 ** 3 - 64 ** 3)
     assert memguard.k0_samples_nbytes(2, 50, vol) - memguard.k0_samples_nbytes(1, 50, vol) \
@@ -226,7 +229,7 @@ def test_estimate_k0_option_reaches_the_estimate(setup, monkeypatch):
     ri = state["info"]
     assert info["recon_nbytes"] == memguard.recon_nbytes(ri["NPro"], ri["NPoints"], 1, list(VOL),
                                                          estimate_k0=True)
-    assert info["recon_k0_method"] == memguard.k0_method(ri["NPro"], ri["NPoints"], list(VOL))["method"]
+    assert info["recon_k0_method"] == memguard.k0_method(ri["NPro"], ri["NPoints"], 1, list(VOL))["method"]
     plain = hook.get_dataobj_info(_Scan(), None, **setup(1, write=False)["kwargs"])
     assert plain["recon_k0_method"] is None
 

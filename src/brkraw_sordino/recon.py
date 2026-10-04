@@ -314,8 +314,8 @@ def recon_dataobj(fid_fobj,
         chunk_spokes (Optional[int]): largest chunk in spokes (the hook takes it
             from the memory limit); None plans it from the sample cap alone.
         k0_method (Optional[str]): with ``virtual_traj``, the least-squares solve:
-            None picks the one with the smaller memory estimate
-            (``memguard.k0_method``, WI-0099, D-0136); ``"toeplitz"`` or
+            None picks it by the memory estimates (``memguard.k0_method``: the
+            sample solve when it halves the estimate, WI-0099, D-0143); ``"toeplitz"`` or
             ``"samples"`` forces one (tests and measurements).
 
     Returns:
@@ -374,13 +374,13 @@ def recon_dataobj(fid_fobj,
     # least-squares normal operator (once for all frames and channels), and the
     # maximum also covers the virtual leading samples, as kcentre.fill_centre's
     # final adjoint over [virtual, measured] does.
-    # The normal operator is the Toeplitz convolution (grids only) or the NUFFT pair at
-    # the samples (memory grows with the samples of a frame); the smaller estimate is
-    # used (WI-0099, D-0136). Both are filled in this pass and solve the same problem.
+    # The normal operator is the Toeplitz convolution (grids only, faster) or the NUFFT
+    # pair at the samples (memory grows with the samples of a frame), used when it halves
+    # the estimate (WI-0099, D-0143). Both are filled in this pass and solve the same problem.
     kernel = None
     if virtual_traj is not None:
         from .kcentre import N_ITER
-        choice = memguard.k0_method(n_pro, n_points, volume_shape)
+        choice = memguard.k0_method(n_pro, n_points, n_receivers, volume_shape)
         method = choice["method"] if k0_method is None else str(k0_method)
         if method == "toeplitz":
             kernel = serial.ToeplitzKernel(volume_shape)
@@ -388,10 +388,13 @@ def recon_dataobj(fid_fobj,
             kernel = serial.SampleNormal(volume_shape, n_pro * (n_points - ignore_samples))
         else:
             raise ValueError(f"k0_method must be None, 'toeplitz' or 'samples', not {k0_method!r}")
-        logger.info("estimate_k0: %s solve%s (memory estimate: samples %.2f GiB, Toeplitz %.2f GiB).",
+        logger.info("estimate_k0: %s solve%s (reconstruction estimate: samples %.2f GiB, "
+                    "Toeplitz %.2f GiB, ratio %.2f; samples when <= %.2f).",
                     "sample-based" if method == "samples" else "Toeplitz",
                     "" if k0_method is None else " (forced)",
-                    choice["samples_nbytes"] / memguard.GIB, choice["toeplitz_nbytes"] / memguard.GIB)
+                    choice["samples_total_nbytes"] / memguard.GIB,
+                    choice["toeplitz_total_nbytes"] / memguard.GIB, choice["ratio"],
+                    memguard.K0_SAMPLES_MAX_FRACTION)
     dmax = 0.0
     for lo, hi in ranges:
         tr = rows(lo, hi)[:, ignore_samples:]

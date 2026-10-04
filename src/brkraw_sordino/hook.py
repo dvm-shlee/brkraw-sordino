@@ -382,7 +382,7 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
         recon_share = max(plan["recon_nbytes"], int(stc_stage_nbytes))
         chunk_spokes = plan["chunk_spokes"]
         n_chunks = plan["n_chunks"]
-        k0_solve = plan["k0_method"]          # estimate_k0: "samples" or "toeplitz" (WI-0099)
+        k0_solve = plan["k0_method"]          # estimate_k0: "samples" or "toeplitz" (WI-0099, D-0143)
     info: Dict[str, Any] = {
         "shape": shape,
         "dtype": real_dt.str,

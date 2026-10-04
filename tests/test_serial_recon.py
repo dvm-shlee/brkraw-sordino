@@ -15,9 +15,9 @@ Part 2 tests the new pieces: per-range trajectory and phase rows, chunk
 independence, the number of samples given to one NUFFT call, the chunk planner
 in ``memguard`` and the hook passing the plan to the reconstruction.
 
-Part 3 (WI-0099, D-0136): estimate_k0 solves with the normal operator that has the
-smaller memory estimate, the Toeplitz form or the NUFFT pair at the samples
-(``serial.SampleNormal``); part 1 runs with both, and the two agree.
+Part 3 (WI-0099, D-0136, D-0143): estimate_k0 solves with the Toeplitz form, or with
+the NUFFT pair at the samples (``serial.SampleNormal``) when that halves the memory
+estimate; part 1 runs with both, and the two agree.
 """
 import inspect
 import io
@@ -159,7 +159,7 @@ def _setup(tmp_path, n_rx, n_frames, phase=True, k0=False, **opts):
 
 #: estimate_k0 cases of part 2 (the Toeplitz solve is stage 2 of WI-0097)
 STAGE_K0 = [False, True]
-#: the two estimate_k0 solves (WI-0099); the test geometry picks Toeplitz by itself
+#: the two estimate_k0 solves (WI-0099); the test geometry picks Toeplitz by itself (D-0143 rule)
 K0_METHODS = ["toeplitz", "samples"]
 #: plain, then estimate_k0 with each solve
 K0_CASES = [pytest.param(False, None, id="plain"), pytest.param(True, "toeplitz", id="k0-toeplitz"),
@@ -448,37 +448,48 @@ def test_the_two_k0_solves_agree(tmp_path, chunk, phase):
             assert abs(a - b) <= METHODS_K0_TOL * abs(b)
 
 
-def test_k0_method_picks_the_smaller_estimate():
+#: (n_pro, n_points, n_rx, grid, solve) under the D-0143 rule; the measured shapes of the
+#: WI-0099 bench (estimate ratio samples / Toeplitz in the comment)
+RULE_CASES = [
+    (80876, 640, 2, 160, "toeplitz"),   # 160^3 fixture geometry (WI-0095 scan, D-0135), 1.05
+    (12800, 64, 1, 128, "samples"),     # WI-0097 decision 2 case, 0.32
+    (3200, 32, 1, 32, "samples"),       # 0.50
+    (12800, 64, 1, 64, "toeplitz"),     # sample solve smaller (0.60) but 4 x slower
+    (28796, 96, 4, 96, "toeplitz"),     # 0.72
+    (51128, 128, 1, 128, "toeplitz"),   # 0.63
+]
+
+
+@pytest.mark.parametrize("n_pro,n_points,n_rx,n,solve", RULE_CASES)
+def test_k0_method_takes_samples_only_when_they_halve_the_estimate(n_pro, n_points, n_rx, n, solve):
     from brkraw_sordino import memguard
 
-    # 160^3 fixture geometry (WI-0095 scan, D-0135): many samples per voxel -> Toeplitz
-    big = memguard.k0_method(80876, 640, (160, 160, 160))
-    assert big["method"] == "toeplitz"
-    assert big["k0_nbytes"] == big["toeplitz_nbytes"] == memguard.k0_fixed_nbytes((160, 160, 160))
-    assert big["samples_nbytes"] > big["toeplitz_nbytes"]
-    # 128^3 grid, 12,800 x 64 samples (WI-0097 decision 2): few samples -> samples
-    few = memguard.k0_method(12800, 64, (128, 128, 128))
-    assert few["method"] == "samples"
-    assert few["k0_nbytes"] == few["samples_nbytes"] == memguard.k0_samples_nbytes(12800, 64, (128,) * 3)
-    assert few["samples_nbytes"] < few["toeplitz_nbytes"]
-    # the planner adds the chosen term; neither the receivers nor the budget change the choice
-    for args, choice in (((80876, 640), big), ((12800, 64), few)):
-        vol = (160,) * 3 if args[0] == 80876 else (128,) * 3
-        for n_rx in (1, 2, 16):
-            plain = memguard.recon_plan(*args, n_rx, vol)
-            for budget in (None, 1, 64 << 30):
-                with_k0 = memguard.recon_plan(*args, n_rx, vol, estimate_k0=True, budget_nbytes=budget)
-                assert with_k0["k0_method"] == choice["method"]
-                if budget is None:
-                    assert with_k0["fixed_nbytes"] - plain["fixed_nbytes"] == choice["k0_nbytes"]
-            assert plain["k0_method"] is None
+    vol = (n, n, n)
+    c = memguard.k0_method(n_pro, n_points, n_rx, vol)
+    assert c["method"] == solve
+    plain = memguard.recon_plan(n_pro, n_points, n_rx, vol)
+    assert c["samples_total_nbytes"] == plain["recon_nbytes"] + memguard.k0_samples_nbytes(n_pro, n_points, vol)
+    assert c["toeplitz_total_nbytes"] == plain["recon_nbytes"] + memguard.k0_fixed_nbytes(vol)
+    assert (c["samples_total_nbytes"] <= memguard.K0_SAMPLES_MAX_FRACTION * c["toeplitz_total_nbytes"]) \
+        == (solve == "samples")
+    assert c["k0_nbytes"] == (c["samples_nbytes"] if solve == "samples" else c["toeplitz_nbytes"])
+    # the planner adds the chosen term; the budget does not change the choice
+    for budget in (None, 1, 64 << 30):
+        with_k0 = memguard.recon_plan(n_pro, n_points, n_rx, vol, estimate_k0=True, budget_nbytes=budget)
+        assert with_k0["k0_method"] == solve
+        if budget is None:
+            assert with_k0["fixed_nbytes"] - plain["fixed_nbytes"] == c["k0_nbytes"]
+    assert plain["k0_method"] is None
 
 
-def test_k0_method_tie_keeps_toeplitz(monkeypatch):
+def test_k0_method_half_is_inclusive(monkeypatch):
     from brkraw_sordino import memguard
 
-    monkeypatch.setattr(memguard, "k0_samples_nbytes", lambda *a: memguard.k0_fixed_nbytes(a[2]))
-    assert memguard.k0_method(12800, 64, (128, 128, 128))["method"] == "toeplitz"
+    ratio = memguard.k0_method(12800, 64, 1, (64, 64, 64))["ratio"]
+    monkeypatch.setattr(memguard, "K0_SAMPLES_MAX_FRACTION", ratio)
+    assert memguard.k0_method(12800, 64, 1, (64, 64, 64))["method"] == "samples"
+    monkeypatch.setattr(memguard, "K0_SAMPLES_MAX_FRACTION", ratio * (1 - 1e-9))
+    assert memguard.k0_method(12800, 64, 1, (64, 64, 64))["method"] == "toeplitz"
 
 
 @pytest.mark.parametrize("chosen", K0_METHODS)
