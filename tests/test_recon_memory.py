@@ -197,14 +197,26 @@ def test_no_spoketiming_stage_when_off_or_cached(setup):
 
 
 def test_estimate_k0_adds_its_share():
-    """The Toeplitz solve (WI-0097 stage 2) adds a grid-only part: the same for any spoke,
-    sample or receiver count; the measured rows are pinned in test_recon_memory_measured."""
+    """estimate_k0 adds the smaller of its two solves (WI-0099, D-0136): the Toeplitz solve
+    (WI-0097 stage 2), a grid-only part the same for any spoke, sample or receiver count, or
+    the sample-based solve, which grows with the samples of a frame; neither depends on the
+    receivers. The measured rows are pinned in test_recon_memory_measured."""
+    vol = (64, 64, 64)
+    picked = set()
     for npro, npts, nrx in [(12800, 64, 1), (25600, 64, 2), (80876, 640, 4)]:
-        plain = memguard.recon_nbytes(npro, npts, nrx, (64, 64, 64))
-        k0 = memguard.recon_nbytes(npro, npts, nrx, (64, 64, 64), estimate_k0=True)
-        assert k0 - plain == memguard.k0_fixed_nbytes((64, 64, 64))
+        plain = memguard.recon_nbytes(npro, npts, nrx, vol)
+        k0 = memguard.recon_nbytes(npro, npts, nrx, vol, estimate_k0=True)
+        toeplitz = memguard.k0_fixed_nbytes(vol)
+        samples = memguard.k0_samples_nbytes(npro, npts, vol)
+        assert k0 - plain == min(toeplitz, samples) == memguard.k0_method(npro, npts, vol)["k0_nbytes"]
+        picked.add(memguard.k0_method(npro, npts, vol)["method"])
+    assert picked == {"samples", "toeplitz"}
     assert memguard.k0_fixed_nbytes((128, 128, 128)) - memguard.k0_fixed_nbytes((64, 64, 64)) \
         == memguard.K0_VOXEL_BYTES * (128 ** 3 - 64 ** 3)
+    assert memguard.k0_samples_nbytes(2, 50, vol) - memguard.k0_samples_nbytes(1, 50, vol) \
+        == memguard.K0_SAMPLE_BYTES * 50
+    assert memguard.k0_samples_nbytes(1, 50, (128,) * 3) - memguard.k0_samples_nbytes(1, 50, vol) \
+        == memguard.K0_SAMPLE_VOXEL_BYTES * (128 ** 3 - 64 ** 3)
 
 
 def test_estimate_k0_option_reaches_the_estimate(setup, monkeypatch):
@@ -214,6 +226,9 @@ def test_estimate_k0_option_reaches_the_estimate(setup, monkeypatch):
     ri = state["info"]
     assert info["recon_nbytes"] == memguard.recon_nbytes(ri["NPro"], ri["NPoints"], 1, list(VOL),
                                                          estimate_k0=True)
+    assert info["recon_k0_method"] == memguard.k0_method(ri["NPro"], ri["NPoints"], list(VOL))["method"]
+    plain = hook.get_dataobj_info(_Scan(), None, **setup(1, write=False)["kwargs"])
+    assert plain["recon_k0_method"] is None
 
 
 def test_a_stop_before_reconstructing_writes_nothing(setup, tmp_path):

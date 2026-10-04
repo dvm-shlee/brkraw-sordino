@@ -373,6 +373,7 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
     recon_share = 0
     chunk_spokes = None
     n_chunks = None
+    k0_solve = None
     if not cached:
         budget = int(limit["limit_nbytes"]) - read_nbytes
         plan = memguard.recon_plan(
@@ -381,6 +382,7 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
         recon_share = max(plan["recon_nbytes"], int(stc_stage_nbytes))
         chunk_spokes = plan["chunk_spokes"]
         n_chunks = plan["n_chunks"]
+        k0_solve = plan["k0_method"]          # estimate_k0: "samples" or "toeplitz" (WI-0099)
     info: Dict[str, Any] = {
         "shape": shape,
         "dtype": real_dt.str,
@@ -397,6 +399,7 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
         "recon_nbytes": recon_share,
         "recon_chunk_spokes": chunk_spokes,
         "recon_chunks": n_chunks,
+        "recon_k0_method": k0_solve,
         "disk_nbytes": disk_nbytes,
         "disk_free_nbytes": None if cached else memguard.free_disk_bytes(Path(options.cache_dir)),
     }

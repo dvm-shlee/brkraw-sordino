@@ -141,6 +141,58 @@ class ToeplitzKernel:
         return np.ascontiguousarray(y[tuple(slice(0, s) for s in self.shape)])
 
 
+class SampleNormal:
+    """The normal operator A^H W A of the estimate_k0 solve at the measured samples (WI-0099).
+
+    The form of ``kcentre.least_squares_image``: a type-2 NUFFT to the samples, the
+    weights, a type-1 NUFFT back (raw sums, no ``norm_factor``), in complex128. The
+    points of every spoke are collected chunk by chunk in the dmax pass (as the
+    Toeplitz kernel is), then both plans are made once and serve every channel and
+    frame. Its memory grows with the sample count of a frame, the Toeplitz form's
+    with the 2N grid, so ``memguard.k0_method`` picks the smaller (D-0136). Both
+    plans use ``KERNEL_UPSAMPFAC`` (fine grid 1.25 per axis instead of 2) at the
+    same tolerance, ``NUFFT_EPS``.
+    """
+
+    def __init__(self, shape: Sequence[int], n_samples: int):
+        self.shape = tuple(int(s) for s in shape)
+        n = int(n_samples)
+        self._cols = tuple(np.empty(n, dtype=np.float64) for _ in range(3))
+        self._w = np.empty(n, dtype=np.float64)
+        self._n = 0
+        self._t1 = self._t2 = None
+
+    def add(self, traj: np.ndarray, weight: np.ndarray) -> None:
+        """Add the samples at ``traj`` with real weights ``weight`` (flat)."""
+        cols = omega_columns(traj)
+        m = int(cols[0].size)
+        lo, hi = self._n, self._n + m
+        if hi > self._w.size:
+            raise ValueError(f"SampleNormal holds {self._w.size} samples, got {hi}")
+        for dst, src in zip(self._cols, cols):
+            dst[lo:hi] = src
+        self._w[lo:hi] = np.asarray(weight, dtype=np.float64).reshape(-1)
+        self._n = hi
+
+    def finish(self, scale: float = 1.0) -> None:
+        """Scale the weights and make the two plans on all samples."""
+        if self._n != self._w.size:
+            raise ValueError(f"SampleNormal expected {self._w.size} samples, got {self._n}")
+        if scale != 1.0:
+            self._w *= scale
+        kw = {"upsampfac": KERNEL_UPSAMPFAC}
+        self._t2 = finufft.Plan(2, self.shape, n_trans=1, eps=NUFFT_EPS, dtype="complex128", **kw)
+        self._t2.setpts(*self._cols)
+        self._t1 = finufft.Plan(1, self.shape, n_trans=1, eps=NUFFT_EPS, dtype="complex128", **kw)
+        self._t1.setpts(*self._cols)
+
+    def normal(self, x: np.ndarray) -> np.ndarray:
+        """A^H W A x (raw sums, no ``norm_factor``) for x on the N grid."""
+        y = self._t2.execute(np.ascontiguousarray(x, dtype=np.complex128))
+        y *= self._w
+        return self._t1.execute(y).reshape(self.shape)
+
+
 def conjugate_gradient(normal, b: np.ndarray, n_iter: int):
     """``kcentre.least_squares_image``'s CG loop (x0 = 0, same stop rule), complex128."""
     x = np.zeros_like(b)
@@ -175,4 +227,4 @@ def forward(x: np.ndarray, traj: np.ndarray) -> np.ndarray:
 
 
 __all__ = ["NUFFT_EPS", "KERNEL_UPSAMPFAC", "norm_factor", "spoke_ranges", "omega_columns",
-           "density", "Adjoint", "ToeplitzKernel", "conjugate_gradient", "forward"]
+           "density", "Adjoint", "ToeplitzKernel", "SampleNormal", "conjugate_gradient", "forward"]

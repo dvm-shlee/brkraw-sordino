@@ -110,8 +110,7 @@ Supported keys:
   Timing values and adjustments are declared in `timing.py`.
 - `estimate_k0`: bool (default: false). Estimates the k-space centre samples
   that the dead time leaves unmeasured, by a least-squares image (one FOV
-  grid, 10 conjugate-gradient iterations, solved on grids so that its memory
-  does not grow with the samples), and adds them to the adjoint
+  grid, 10 conjugate-gradient iterations), and adds them to the adjoint
   reconstruction. SORDINO v1-v3 only; on a general ZTE it is ignored with an
   info message. It stops with an error when `correct_ramptime` is false. It
   changes the image noticeably, no ground truth exists yet, and it makes the
@@ -148,9 +147,16 @@ cache and are not part of the cache key):
   step that runs first in the same process (`recon_nbytes`). The
   reconstruction goes through each frame in contiguous chunks of spokes (at
   most about 13 M samples each), so its memory is a fixed part (the image of
-  every receiver and one NUFFT grid; with `estimate_k0` also the grids of its
-  least-squares solve, about 1 KiB per output voxel) plus one chunk, and does
-  not grow with the number of spokes or frames. What the limit leaves after
+  every receiver and one NUFFT grid; with `estimate_k0` also its
+  least-squares solve) plus one chunk, and does not grow with the number of
+  spokes or frames. The `estimate_k0` solve runs either on grids (about 1 KiB
+  per output voxel, whatever the sample count) or at the samples (about 128 B
+  per voxel plus 80 B per sample of a frame), whichever estimate is smaller;
+  an info log line names the choice. Both give the same image and K0 within
+  the NUFFT tolerance; the grid solve is faster, the sample solve uses less
+  memory when a frame has few samples for its grid. Example: a 128^3 grid with
+  12,800 x 64 samples per frame measured 0.57 GiB with the sample solve
+  (2.08 GiB on grids). What the limit leaves after
   the read buffers sets the chunk size; the check stops only when even a
   256-spoke chunk does not fit. With spoke-timing correction the estimate is
   the larger of that and 5 x one FID segment, whose size follows `mem_limit`.

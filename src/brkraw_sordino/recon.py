@@ -281,7 +281,8 @@ def recon_dataobj(fid_fobj,
                   phase_factor=None,
                   virtual_traj=None,
                   k0_out=None,
-                  chunk_spokes=None):
+                  chunk_spokes=None,
+                  k0_method=None):
     """Reconstruct image volumes from FID data and write to an output file.
 
     Each frame is reconstructed in contiguous spoke chunks (WI-0097, D-0133):
@@ -312,6 +313,10 @@ def recon_dataobj(fid_fobj,
             appended, holding the estimated K0 (complex) of each channel.
         chunk_spokes (Optional[int]): largest chunk in spokes (the hook takes it
             from the memory limit); None plans it from the sample cap alone.
+        k0_method (Optional[str]): with ``virtual_traj``, the least-squares solve:
+            None picks the one with the smaller memory estimate
+            (``memguard.k0_method``, WI-0099, D-0136); ``"toeplitz"`` or
+            ``"samples"`` forces one (tests and measurements).
 
     Returns:
         np.dtype: Dtype of the reconstructed output volumes.
@@ -369,10 +374,24 @@ def recon_dataobj(fid_fobj,
     # least-squares normal operator (once for all frames and channels), and the
     # maximum also covers the virtual leading samples, as kcentre.fill_centre's
     # final adjoint over [virtual, measured] does.
+    # The normal operator is the Toeplitz convolution (grids only) or the NUFFT pair at
+    # the samples (memory grows with the samples of a frame); the smaller estimate is
+    # used (WI-0099, D-0136). Both are filled in this pass and solve the same problem.
     kernel = None
     if virtual_traj is not None:
         from .kcentre import N_ITER
-        kernel = serial.ToeplitzKernel(volume_shape)
+        choice = memguard.k0_method(n_pro, n_points, volume_shape)
+        method = choice["method"] if k0_method is None else str(k0_method)
+        if method == "toeplitz":
+            kernel = serial.ToeplitzKernel(volume_shape)
+        elif method == "samples":
+            kernel = serial.SampleNormal(volume_shape, n_pro * (n_points - ignore_samples))
+        else:
+            raise ValueError(f"k0_method must be None, 'toeplitz' or 'samples', not {k0_method!r}")
+        logger.info("estimate_k0: %s solve%s (memory estimate: samples %.2f GiB, Toeplitz %.2f GiB).",
+                    "sample-based" if method == "samples" else "Toeplitz",
+                    "" if k0_method is None else " (forced)",
+                    choice["samples_nbytes"] / memguard.GIB, choice["toeplitz_nbytes"] / memguard.GIB)
     dmax = 0.0
     for lo, hi in ranges:
         tr = rows(lo, hi)[:, ignore_samples:]
@@ -426,7 +445,8 @@ def recon_dataobj(fid_fobj,
             del k
         if kernel is not None:
             # estimate_k0 (kcentre.fill_centre, WI-0097 stage 2): acc[ch] is the raw
-            # A^H W y; solve A^H W A x = A^H W y by CG on the Toeplitz form, K0 = A_0 x =
+            # A^H W y; solve A^H W A x = A^H W y by CG on the chosen normal operator
+            # (Toeplitz form or the samples, WI-0099), K0 = A_0 x =
             # sum(x), predict the virtual samples A_v x and add their adjoint. The raw x
             # is the product's iterate divided by nf, so the predictions are the same.
             if not reuse:

@@ -14,6 +14,10 @@ then and is dropped by ``_call``) and must keep passing with any chunk size.
 Part 2 tests the new pieces: per-range trajectory and phase rows, chunk
 independence, the number of samples given to one NUFFT call, the chunk planner
 in ``memguard`` and the hook passing the plan to the reconstruction.
+
+Part 3 (WI-0099, D-0136): estimate_k0 solves with the normal operator that has the
+smaller memory estimate, the Toeplitz form or the NUFFT pair at the samples
+(``serial.SampleNormal``); part 1 runs with both, and the two agree.
 """
 import inspect
 import io
@@ -116,10 +120,14 @@ def _reference(frames, info, options, traj, factor, virtual_traj, offset=0, n_fr
     return imgs, k0s
 
 
-def _call(fid, traj, info, out, options, chunk_spokes=None, **kw):
-    """recon_dataobj with ``chunk_spokes`` when this version has it (366f5fc does not)."""
-    if "chunk_spokes" in inspect.signature(recon_dataobj).parameters:
+def _call(fid, traj, info, out, options, chunk_spokes=None, k0_method=None, **kw):
+    """recon_dataobj with ``chunk_spokes`` and ``k0_method`` when this version has them
+    (366f5fc has neither, 858de87 has no ``k0_method``)."""
+    params = inspect.signature(recon_dataobj).parameters
+    if "chunk_spokes" in params:
         kw["chunk_spokes"] = chunk_spokes
+    if "k0_method" in params:
+        kw["k0_method"] = k0_method
     return recon_dataobj(fid, traj, info, out, options, **kw)
 
 
@@ -151,6 +159,11 @@ def _setup(tmp_path, n_rx, n_frames, phase=True, k0=False, **opts):
 
 #: estimate_k0 cases of part 2 (the Toeplitz solve is stage 2 of WI-0097)
 STAGE_K0 = [False, True]
+#: the two estimate_k0 solves (WI-0099); the test geometry picks Toeplitz by itself
+K0_METHODS = ["toeplitz", "samples"]
+#: plain, then estimate_k0 with each solve
+K0_CASES = [pytest.param(False, None, id="plain"), pytest.param(True, "toeplitz", id="k0-toeplitz"),
+            pytest.param(True, "samples", id="k0-samples")]
 CHUNKS = [None, N_PRO, math.ceil(N_PRO / 3), 7]
 CHUNK_IDS = ["default", "one", "three", "spokes7"]
 
@@ -170,12 +183,13 @@ def test_plain_equals_whole_array_reference(tmp_path, n_rx, chunk):
         assert _rel(g, r) < PLAIN_TOL
 
 
+@pytest.mark.parametrize("method", K0_METHODS)
 @pytest.mark.parametrize("chunk", CHUNKS, ids=CHUNK_IDS)
 @pytest.mark.parametrize("n_rx", [1, 2])
-def test_estimate_k0_equals_fill_centre(tmp_path, n_rx, chunk):
+def test_estimate_k0_equals_fill_centre(tmp_path, n_rx, chunk, method):
     info, options, traj, factor, frames, vt = _setup(tmp_path, n_rx, 2, k0=True)
     out, k0s = io.BytesIO(), []
-    _call(io.BytesIO(b"".join(frames)), traj, info, out, options, chunk,
+    _call(io.BytesIO(b"".join(frames)), traj, info, out, options, chunk, method,
           phase_factor=factor, virtual_traj=vt, k0_out=k0s)
     ref, ref_k0 = _reference(frames, info, options, traj, factor, vt)
     got = _written(out, n_rx, 2)
@@ -208,14 +222,15 @@ def test_offset_and_num_frames_read_the_right_frames(tmp_path, chunk):
         assert _rel(g, r) < PLAIN_TOL
 
 
+@pytest.mark.parametrize("method", K0_METHODS)
 @pytest.mark.parametrize("chunk", [None, 17], ids=["default", "spokes17"])
-def test_spoketiming_buffer_path_equals_reference(tmp_path, chunk):
+def test_spoketiming_buffer_path_equals_reference(tmp_path, chunk, method):
     """The spoke-timing cache holds float64 frames from position 0 (override buffer/dtype)."""
     info, options, traj, factor, frames, vt = _setup(tmp_path, 2, 2, k0=True)
     as_f8 = [np.frombuffer(f, dtype="<i4").astype("<f8").tobytes() for f in frames]
     buf = int(2 * N_POINTS * 2 * N_PRO * 8)
     out, k0s = io.BytesIO(), []
-    _call(io.BytesIO(b"".join(as_f8)), traj, info, out, options, chunk,
+    _call(io.BytesIO(b"".join(as_f8)), traj, info, out, options, chunk, method,
           override_buffer_size=buf, override_dtype=np.dtype("<f8"),
           phase_factor=factor, virtual_traj=vt, k0_out=k0s)
     ref, ref_k0 = _reference(frames, info, options, traj, factor, vt)
@@ -255,8 +270,8 @@ def test_phase_rows_equal_the_whole_factor(tmp_path):
     assert phase_correction_rows(_info(phase=False), options, N_POINTS) is None
 
 
-@pytest.mark.parametrize("k0", STAGE_K0)
-def test_one_chunk_and_three_chunks_agree(tmp_path, k0):
+@pytest.mark.parametrize("k0,method", K0_CASES)
+def test_one_chunk_and_three_chunks_agree(tmp_path, k0, method):
     from brkraw_sordino.traj import trajectory_rows
 
     info, options, traj, factor, frames, vt = _setup(tmp_path, 2, 1, k0=k0)
@@ -265,7 +280,7 @@ def test_one_chunk_and_three_chunks_agree(tmp_path, k0):
     for chunk in (N_PRO, math.ceil(N_PRO / 3)):
         out, k0s = io.BytesIO(), []
         recon_dataobj(io.BytesIO(frames[0]), rows, info, out, options, phase_factor=factor,
-                      virtual_traj=vt, k0_out=k0s, chunk_spokes=chunk)
+                      virtual_traj=vt, k0_out=k0s, chunk_spokes=chunk, k0_method=method)
         res.append((_written(out, 2, 1)[0], k0s))
     assert _rel(res[1][0], res[0][0]) < 1e-10
     if k0:
@@ -273,10 +288,12 @@ def test_one_chunk_and_three_chunks_agree(tmp_path, k0):
             assert abs(a - b) <= 1e-10 * abs(b)
 
 
-@pytest.mark.parametrize("k0", STAGE_K0)
-def test_no_nufft_call_gets_more_samples_than_one_chunk(tmp_path, monkeypatch, k0):
+@pytest.mark.parametrize("k0,method", K0_CASES)
+def test_no_nufft_call_gets_more_samples_than_one_chunk(tmp_path, monkeypatch, k0, method):
     """Deterministic memory test (WI-0096 test design 2): count the points given to
-    every NUFFT plan instead of measuring memory."""
+    every NUFFT plan instead of measuring memory. The sample-based K0 solve (WI-0099)
+    holds all samples of a frame in its two plans by design (its estimate counts them,
+    ``memguard.k0_samples_nbytes``); every other call stays within one chunk."""
     from brkraw_sordino import serial
 
     seen = []
@@ -298,16 +315,21 @@ def test_no_nufft_call_gets_more_samples_than_one_chunk(tmp_path, monkeypatch, k
     chunk = 29
     out = io.BytesIO()
     recon_dataobj(io.BytesIO(b"".join(frames)), traj, info, out, options, phase_factor=factor,
-                  virtual_traj=vt, k0_out=[], chunk_spokes=chunk)
+                  virtual_traj=vt, k0_out=[], chunk_spokes=chunk, k0_method=method)
     n_kept = N_POINTS - 1
     n_chunks = math.ceil(N_PRO / chunk)
+    if method == "samples":
+        whole = [s for s in seen if s == N_PRO * n_kept]
+        assert len(whole) == 2                 # type 2 and type 1, made once for all frames
+        seen = [s for s in seen if s != N_PRO * n_kept]
     # the virtual leading points (estimate_k0: M per spoke, all spokes) are one small
     # fixed set; every other call is a chunk of measured samples
     data_calls = [s for s in seen if s != N_PRO * vt.shape[1]] if k0 else seen
     assert data_calls and max(data_calls) <= chunk * n_kept
-    # per frame one call per chunk (all channels share it); with estimate_k0 one more
-    # pass for the convolution kernel (once for all frames) and the virtual points per frame
-    assert len(data_calls) == (2 + int(k0)) * n_chunks
+    # per frame one call per chunk (all channels share it); with the Toeplitz solve one
+    # more pass for the convolution kernel (once for all frames; the sample-based solve
+    # copies the chunk points instead) and the virtual points per frame
+    assert len(data_calls) == (2 + int(method == "toeplitz")) * n_chunks
 
 
 def test_planner_caps_and_equalises_the_chunks():
@@ -398,3 +420,103 @@ def test_hook_plans_the_chunks_from_the_limit_and_the_result_does_not_change(tmp
     assert seen == [infos[0]["recon_chunk_spokes"], infos[1]["recon_chunk_spokes"]]
     for a, b in zip(results[0], results[1]):
         assert np.allclose(a, b, rtol=0, atol=1e-10 * np.abs(results[0][0]).max())
+
+
+# ----------------------------------------------------------------------------- part 3
+#: The two estimate_k0 solves (WI-0099, acceptance 4): every NUFFT runs at tolerance 1e-6
+#: (``serial.NUFFT_EPS``), so the image is held to that and one K0 value to 10 x it, as
+#: K0_VAL_TOL against fill_centre. Observed: 4e-10 (image) and 2e-9 (K0) on this geometry;
+#: 2e-8 to 6e-8 and 2e-7 at 32^3-128^3 and 2e-11 and 1.2e-6 at 160^3 (WI-0099 bench).
+METHODS_IMG_TOL = 1e-6
+METHODS_K0_TOL = 1e-5
+
+
+@pytest.mark.parametrize("chunk", [None, 7], ids=["default", "spokes7"])
+@pytest.mark.parametrize("phase", [True, False])
+def test_the_two_k0_solves_agree(tmp_path, chunk, phase):
+    info, options, traj, factor, frames, vt = _setup(tmp_path, 2, 2, phase=phase, k0=True)
+    got = {}
+    for method in K0_METHODS:
+        out, k0s = io.BytesIO(), []
+        recon_dataobj(io.BytesIO(b"".join(frames)), traj, info, out, options, phase_factor=factor,
+                      virtual_traj=vt, k0_out=k0s, chunk_spokes=chunk, k0_method=method)
+        got[method] = (_written(out, 2, 2), k0s)
+    for a, b in zip(got["samples"][0], got["toeplitz"][0]):
+        assert _rel(a, b) < METHODS_IMG_TOL
+    for fa, fb in zip(got["samples"][1], got["toeplitz"][1]):
+        for a, b in zip(fa, fb):
+            assert abs(a - b) <= METHODS_K0_TOL * abs(b)
+
+
+def test_k0_method_picks_the_smaller_estimate():
+    from brkraw_sordino import memguard
+
+    # 160^3 fixture geometry (WI-0095 scan, D-0135): many samples per voxel -> Toeplitz
+    big = memguard.k0_method(80876, 640, (160, 160, 160))
+    assert big["method"] == "toeplitz"
+    assert big["k0_nbytes"] == big["toeplitz_nbytes"] == memguard.k0_fixed_nbytes((160, 160, 160))
+    assert big["samples_nbytes"] > big["toeplitz_nbytes"]
+    # 128^3 grid, 12,800 x 64 samples (WI-0097 decision 2): few samples -> samples
+    few = memguard.k0_method(12800, 64, (128, 128, 128))
+    assert few["method"] == "samples"
+    assert few["k0_nbytes"] == few["samples_nbytes"] == memguard.k0_samples_nbytes(12800, 64, (128,) * 3)
+    assert few["samples_nbytes"] < few["toeplitz_nbytes"]
+    # the planner adds the chosen term; neither the receivers nor the budget change the choice
+    for args, choice in (((80876, 640), big), ((12800, 64), few)):
+        vol = (160,) * 3 if args[0] == 80876 else (128,) * 3
+        for n_rx in (1, 2, 16):
+            plain = memguard.recon_plan(*args, n_rx, vol)
+            for budget in (None, 1, 64 << 30):
+                with_k0 = memguard.recon_plan(*args, n_rx, vol, estimate_k0=True, budget_nbytes=budget)
+                assert with_k0["k0_method"] == choice["method"]
+                if budget is None:
+                    assert with_k0["fixed_nbytes"] - plain["fixed_nbytes"] == choice["k0_nbytes"]
+            assert plain["k0_method"] is None
+
+
+def test_k0_method_tie_keeps_toeplitz(monkeypatch):
+    from brkraw_sordino import memguard
+
+    monkeypatch.setattr(memguard, "k0_samples_nbytes", lambda *a: memguard.k0_fixed_nbytes(a[2]))
+    assert memguard.k0_method(12800, 64, (128, 128, 128))["method"] == "toeplitz"
+
+
+@pytest.mark.parametrize("chosen", K0_METHODS)
+def test_recon_uses_and_logs_the_chosen_solve(tmp_path, monkeypatch, caplog, chosen):
+    import logging
+
+    from brkraw_sordino import memguard, serial
+
+    real = memguard.k0_method
+
+    def pick(*a):
+        res = dict(real(*a))
+        res["method"] = chosen
+        return res
+
+    made = []
+    for cls in ("ToeplitzKernel", "SampleNormal"):
+        orig = getattr(serial, cls)
+
+        def spy(*a, _orig=orig, _name=cls, **kw):
+            made.append(_name)
+            return _orig(*a, **kw)
+
+        monkeypatch.setattr(serial, cls, spy)
+    monkeypatch.setattr(memguard, "k0_method", pick)
+    info, options, traj, factor, frames, vt = _setup(tmp_path, 1, 1, k0=True)
+    with caplog.at_level(logging.INFO, logger="brkraw_sordino.recon"):
+        recon_dataobj(io.BytesIO(frames[0]), traj, info, io.BytesIO(), options, phase_factor=factor,
+                      virtual_traj=vt, k0_out=[])
+    assert made == ["ToeplitzKernel" if chosen == "toeplitz" else "SampleNormal"]
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("estimate_k0:")]
+    assert len(lines) == 1
+    assert ("sample-based" in lines[0]) == (chosen == "samples")
+    assert "(forced)" not in lines[0] and "GiB" in lines[0]
+
+
+def test_unknown_k0_method_is_refused(tmp_path):
+    info, options, traj, factor, frames, vt = _setup(tmp_path, 1, 1, k0=True)
+    with pytest.raises(ValueError, match="k0_method"):
+        recon_dataobj(io.BytesIO(frames[0]), traj, info, io.BytesIO(), options, phase_factor=factor,
+                      virtual_traj=vt, k0_out=[], k0_method="cg")
