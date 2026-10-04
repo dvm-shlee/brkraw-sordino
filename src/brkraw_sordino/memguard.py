@@ -168,8 +168,8 @@ def k0_method(n_pro, n_points, n_receivers, volume_shape, *, budget_nbytes=None)
     most ``K0_SAMPLES_MAX_FRACTION`` (half) of the estimate with the Toeplitz solve
     (``k0_fixed_nbytes``); otherwise ``"toeplitz"`` (``serial.ToeplitzKernel``, faster). The
     whole estimates are taken without a budget (the serial fixed part plus the capped chunk plus
-    the K0 term), so the choice depends only on the scan geometry and the receivers, not on the
-    memory limit: a scan always takes the same path. Both give the same K0 and image within the
+    the K0 term), so the rule depends only on the scan geometry and the receivers; only the
+    fallback below looks at the memory limit. Both give the same K0 and image within the
     NUFFT tolerance (tests/test_serial_recon.py).
 
     With ``budget_nbytes`` (the planner's budget; D-0147): when the rule picks Toeplitz, the
