@@ -109,12 +109,22 @@ Supported keys:
   every spoke keeps one fixed gradient vector and no phase correction.
   Timing values and adjustments are declared in `timing.py`.
 - `estimate_k0`: bool (default: false). Estimates the k-space centre samples
-  that the dead time leaves unmeasured, by a least-squares image (one FOV
-  grid, 10 conjugate-gradient iterations), and adds them to the adjoint
+  that the dead time leaves unmeasured, by a least-squares image (one channel
+  at a time, 10 conjugate-gradient iterations), and adds them to the adjoint
   reconstruction. SORDINO v1-v3 only; on a general ZTE it is ignored with an
   info message. It stops with an error when `correct_ramptime` is false. It
   changes the image noticeably, no ground truth exists yet, and it makes the
-  reconstruction slower, so it is off by default.
+  reconstruction slower, so it is off by default. The least-squares solve has
+  two forms that give the same image and K0 within the NUFFT tolerance. The
+  Toeplitz solve works on grids only (memory about 1 KiB per output voxel plus
+  64 MiB, whatever the sample count) and is the faster one. The sample solve
+  works at the samples (about 128 B per voxel plus 80 B per sample of a frame
+  plus 16 MiB). There is no option to choose: the hook picks the sample solve
+  only when its whole reconstruction estimate is at most half of the Toeplitz
+  one (a frame with few samples for its grid), or when the Toeplitz solve does
+  not fit the memory limit even with the smallest chunk and the sample solve
+  does; otherwise it uses the Toeplitz solve. An info log line names the solve
+  and the estimates. `get_dataobj_info` reports the choice (below).
 - `offreso_freqs`: float or list of floats in Hz, one per receive channel
   (default: none).
 - `mem_limit`: float (default: 0.5)
@@ -173,9 +183,33 @@ cache and are not part of the cache key):
   above every measurement, by up to 2 x.
 
 `brkraw_sordino.get_dataobj_info(scan, reco_id, **options)` returns the same
-estimate without reading data (shape, dtype and count of the returned arrays,
-bytes, whether a valid cache exists, cache size, memory estimate and limit),
-for callers that decide before loading.
+estimate without reading data, for callers that decide before loading. It
+takes the same options as `get_dataobj` (`frames`, `axis`, `max_memory_gb`, the
+reconstruction options) and returns a dict with these keys:
+
+- `shape`, `dtype`, `count`, `nbytes`: shape and real dtype string of each
+  returned array, how many arrays are returned (channels when `split_ch`, times
+  2 with `as_complex`), and the bytes of all of them.
+- `frames`, `frames_reconstructed`: frames returned, and frames in the
+  reconstruction (and its cache).
+- `cached`: a valid recon cache exists. `cache_path`, `cache_dir`,
+  `cache_dtype` (complex128 until a cache exists) and `cache_nbytes` describe
+  the cache file.
+- `peak_nbytes`: the memory estimate that is compared with the limit (the
+  returned arrays, three cache frames and, without a cache, `recon_nbytes`).
+- `recon_nbytes`, `recon_chunk_spokes`, `recon_chunks`: the reconstruction
+  step's estimate, spokes per chunk and number of chunks. Without a cache
+  these are the planned values; with a cache `recon_nbytes` is 0 and the other
+  two are null.
+- `recon_k0_method`: `"toeplitz"` or `"samples"` with `estimate_k0` and no
+  cache, otherwise null. `recon_k0_reason`: why it was chosen, `"rule"` (the
+  half rule above) or `"limit"` (only the sample solve fits the memory limit),
+  null when `recon_k0_method` is null.
+- `disk_nbytes`, `disk_free_nbytes`: disk a new cache needs (0 when cached)
+  and the free space in `cache_dir` (null when cached or unreadable).
+- `limit_nbytes`, `limit_source`: the memory limit that `get_dataobj`
+  applies, and where it comes from (`max_memory_gb option`,
+  `half of physical memory` or `fallback 4 GB`).
 
 Boolean values are read case-insensitively: `true`, `True`, `TRUE`, `false`,
 `False` (also `1`, `0`, `yes`, `no`, `on`, `off`), from YAML or from
