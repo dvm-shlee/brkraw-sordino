@@ -1,6 +1,7 @@
 """Hook options after BRK-0066: bool parsing, removed keys, estimate_k0 rules."""
 import logging
 
+import numpy as np
 import pytest
 
 from brkraw_sordino.hook import _build_options, _resolve_k0
@@ -83,3 +84,47 @@ def test_estimate_k0_changes_the_recon_cache_key(tmp_path):
     pa = build_recon_cache_path(tmp_path, {"options": asdict(a)})
     pb = build_recon_cache_path(tmp_path, {"options": asdict(b)})
     assert pa != pb
+
+
+# WI-0106: offreso_freqs read the same value from a string, a sequence and a number
+@pytest.mark.parametrize("value, expected", [
+    ("120,-80", (120.0, -80.0)),
+    (" 120 , -80 ", (120.0, -80.0)),
+    ("120 -80", (120.0, -80.0)),
+    ("[120, -80]", (120.0, -80.0)),
+    ("(120,-80)", (120.0, -80.0)),
+    ([120, -80], (120.0, -80.0)),
+    ((120.0, -80.0), (120.0, -80.0)),
+    (np.array([120.0, -80.0]), (120.0, -80.0)),
+    (["120", "-80"], (120.0, -80.0)),
+    ("120", (120.0,)),
+    ("-80.5", (-80.5,)),
+    ("1e2", (100.0,)),
+    (120, (120.0,)),
+    (120.0, (120.0,)),
+    (np.float64(120.0), (120.0,)),
+    (np.int64(120), (120.0,)),
+    (0, (0.0,)),
+    ([120, None], (120.0, None)),
+    (None, ()),
+    ("", ()),
+    ([], ()),
+    ((), ()),
+])
+def test_offreso_freqs_same_value_from_any_form(tmp_path, value, expected):
+    got = _opts(tmp_path, offreso_freqs=value).offreso_freqs
+    assert got == expected
+    assert isinstance(got, tuple)
+    assert all(v is None or type(v) is float for v in got)
+
+
+def test_offreso_freqs_string_is_not_split_into_characters(tmp_path):
+    # the defect: "120,-80" became ('1', '2', '0', ',', '-', '8', '0')
+    assert _opts(tmp_path, offreso_freqs="120,-80").offreso_freqs == (120.0, -80.0)
+
+
+@pytest.mark.parametrize("bad", ["abc", "120,x", "nan", "inf", [120, "x"], True,
+                                 [True, 1], {"a": 1}, [[1, 2]], b"120"])
+def test_offreso_freqs_bad_value_is_refused_by_name(tmp_path, bad):
+    with pytest.raises(ValueError, match="offreso_freqs"):
+        _opts(tmp_path, offreso_freqs=bad)
