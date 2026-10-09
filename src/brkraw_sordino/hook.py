@@ -60,6 +60,46 @@ def _normalize_ext_factors(value: Any) -> Tuple[float, float, float]:
     raise ValueError("ext_factors must be a scalar or a 3-item sequence")
 
 
+def _offreso_item(item: Any) -> Optional[float]:
+    if item is None:
+        return None
+    if isinstance(item, (bool, np.bool_)):
+        raise ValueError(f"offreso_freqs must be numbers in Hz, got {item!r}")
+    if isinstance(item, str):
+        try:
+            number = float(item.strip())
+        except ValueError:
+            raise ValueError(f"offreso_freqs must be numbers in Hz, got {item!r}") from None
+    elif isinstance(item, (int, float, np.integer, np.floating)):
+        number = float(item)
+    else:
+        raise ValueError(f"offreso_freqs must be numbers in Hz, got {item!r}")
+    if not np.isfinite(number):
+        raise ValueError(f"offreso_freqs must be finite numbers in Hz, got {item!r}")
+    return number
+
+
+def _normalize_offreso_freqs(value: Any) -> Tuple[Optional[float], ...]:
+    """``offreso_freqs`` as a tuple of floats in Hz, one per receive channel (WI-0106).
+
+    A number, a string (``"120"``, ``"120,-80"``, ``"120 -80"``, ``"[120, -80]"``) and a
+    list, tuple or array all read as the same values; nothing means no correction.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        text = value.strip()
+        if len(text) >= 2 and (text[0], text[-1]) in (("[", "]"), ("(", ")")):
+            text = text[1:-1]
+        parts = text.replace(",", " ").split()
+        return tuple(_offreso_item(part) for part in parts)
+    if isinstance(value, np.ndarray):
+        value = value.tolist()
+    if isinstance(value, (list, tuple)):
+        return tuple(_offreso_item(item) for item in value)
+    return (_offreso_item(value),)
+
+
 def _get_cache_dir(path: Optional[Union[str, Path]]) -> Path:
     if path:
         base = Path(path).expanduser()
@@ -101,9 +141,7 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
             "were removed; correct_ramptime now covers both)", ", ".join(unknown_keys))
     cache_dir = _get_cache_dir(kwargs.get("cache_dir"))
     logger.debug("Cache dir: %s", cache_dir)
-    offreso_freqs = kwargs.get("offreso_freqs")
-    if isinstance(offreso_freqs, (int, float)):
-        offreso_freqs = (offreso_freqs, )
+    offreso_freqs = _normalize_offreso_freqs(kwargs.get("offreso_freqs"))
 
     correct_ramptime = parse_bool("correct_ramptime", kwargs.get("correct_ramptime", True))
     estimate_k0 = parse_bool("estimate_k0", kwargs.get("estimate_k0", False))
@@ -119,7 +157,7 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         num_frames=kwargs.get("num_frames"),
         correct_spoketiming=parse_bool("correct_spoketiming", kwargs.get("correct_spoketiming", False)),
         correct_ramptime=correct_ramptime,
-        offreso_freqs=tuple(offreso_freqs) if offreso_freqs else (),
+        offreso_freqs=offreso_freqs,
         mem_limit=float(kwargs.get("mem_limit", 0.5)),
         clear_cache=parse_bool("clear_cache", kwargs.get("clear_cache", True)),
         split_ch=parse_bool("split_ch", kwargs.get("split_ch", False)),

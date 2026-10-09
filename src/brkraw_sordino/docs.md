@@ -125,8 +125,9 @@ Supported keys:
   not fit the memory limit even with the smallest chunk and the sample solve
   does; otherwise it uses the Toeplitz solve. An info log line names the solve
   and the estimates. `get_dataobj_info` reports the choice (below).
-- `offreso_freqs`: float or list of floats in Hz, one per receive channel
-  (default: none).
+- `offreso_freqs`: float, list of floats or a string such as `"120,-80"` in Hz,
+  one per receive channel; every form reads as the same values and a value that
+  is not a finite number is refused (default: none).
 - `mem_limit`: float (default: 0.5)
 - `clear_cache`: bool (default: true)
 - `split_ch`: bool (default: false, merge channels)
