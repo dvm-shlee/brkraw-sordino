@@ -296,3 +296,21 @@ def test_parameters_without_frame_size_or_count_leave_the_fid_alone(tmp_path, ch
     got = hook._check_fid_size(_Scan(), info, _FidEntry(b""), 10, options, True)
     assert got is None
     assert set(info) == set(before) and info["NRepetitions"] == before["NRepetitions"]
+
+
+def test_one_scan_object_warns_once_and_a_new_one_warns_again(tmp_path, monkeypatch, caplog):
+    """The viewer asks get_dataobj_info, then get_dataobj, on the same scan: one warning."""
+    info, frames = _info(tmp_path, 1)
+    _patch(monkeypatch, info, _FidEntry(_short(frames, 2, 10)))
+    kw = {"cache_dir": str(tmp_path / "c")}
+
+    def count():
+        return len([r for r in caplog.records if "the FID is short" in r.getMessage()])
+
+    with caplog.at_level(logging.WARNING, logger="brkraw_sordino.hook"):
+        scan = _Scan()
+        hook.get_dataobj_info(scan, None, **kw)
+        hook.get_dataobj(scan, None, **kw)
+        assert count() == 1
+        hook.get_dataobj(_Scan(), None, **kw)                 # a new scan (cache read): warns again
+        assert count() == 2
