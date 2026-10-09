@@ -8,6 +8,10 @@ with ``num_frames`` set to that count, with and without spoke-timing correction 
 ``estimate_k0``. No complete frame, or an ``offset`` at or after the last complete
 frame, stops with a reason. ``allow_short_fid=false`` restores the stop (before
 anything is reconstructed). A complete FID keeps its recon cache key.
+
+"Equals" is within the tolerances of test_serial_recon.py: two identical complete
+runs already differ by up to 1.7e-10 (relative to the maximum; the NUFFT is not
+bit-reproducible from run to run, WI-0109 probe), so no bit equality is asked.
 """
 import io
 import json
@@ -18,7 +22,7 @@ import numpy as np
 import pytest
 
 from brkraw_sordino import hook
-from test_serial_recon import _setup
+from test_serial_recon import K0_IMG_TOL, K0_VAL_TOL, PLAIN_TOL, _rel, _setup
 
 PLANNED = 4
 
@@ -64,11 +68,11 @@ def _info(tmp_path, n_rx=1, phase=True, k0=False, n_frames=PLANNED, **opts):
     return info, frames
 
 
-def _same(a, b):
+def _same(a, b, tol=PLAIN_TOL):
     assert len(a) == len(b)
     for x, y in zip(a, b):
         assert x.shape == y.shape
-        assert np.array_equal(x, y)
+        assert _rel(x, y) < tol
 
 
 @pytest.mark.parametrize("n_rx", [1, 2])
@@ -124,9 +128,12 @@ def test_short_fid_with_estimate_k0_keeps_one_k0_per_complete_frame(tmp_path, mo
     _patch(monkeypatch, info, _FidEntry(_short(frames, 2, 8)))
     scan = _Scan()
     got = hook.get_dataobj(scan, None, cache_dir=str(tmp_path / "short"), **kw)
-    assert np.array_equal(got, ref)
-    assert len(scan._sordino_recon_meta["k0"]) == 2
-    assert scan._sordino_recon_meta["k0"] == full_scan._sordino_recon_meta["k0"]
+    _same([got], [ref], K0_IMG_TOL)
+    k0, ref_k0 = scan._sordino_recon_meta["k0"], full_scan._sordino_recon_meta["k0"]
+    assert len(k0) == 2 and len(ref_k0) == 2
+    for frame, ref_frame in zip(k0, ref_k0):
+        for a, b in zip(frame, ref_frame):
+            assert abs(complex(*a) - complex(*b)) <= K0_VAL_TOL * abs(complex(*b))
 
 
 def test_offset_and_num_frames_count_within_the_complete_frames(tmp_path, monkeypatch):
@@ -263,6 +270,29 @@ def test_zip_member_size_is_read_from_the_archive_without_opening_it(tmp_path, m
 
         monkeypatch.setattr(ZippedFile, "open", fail)
         assert hook._fid_nbytes(entry) == len(payload)
+    monkeypatch.undo()
+    with zipfile.ZipFile(path) as zf:                          # an entry that opens a zip stream
+
+        class _Stream:
+            name = "fid"
+
+            def open(self):
+                handle = zf.open("1/fid")
+                handle.seek = None                             # seeking would decompress
+                return handle
+
+        assert hook._fid_nbytes(_Stream()) == len(payload)
     assert hook._fid_nbytes(_FidEntry(b"x" * 1234)) == 1234
     assert hook._fid_nbytes(_NoSize()) is None
     assert hook._fid_nbytes(None) is None
+
+
+@pytest.mark.parametrize("change", [{"NRepetitions": None}, {"NPro": 0}, {"NPoints": None}])
+def test_parameters_without_frame_size_or_count_leave_the_fid_alone(tmp_path, change):
+    info, frames = _info(tmp_path, 1)
+    info.update(change)
+    options = hook._build_options({"cache_dir": str(tmp_path / "c")})
+    before = dict(info)
+    got = hook._check_fid_size(_Scan(), info, _FidEntry(b""), 10, options, True)
+    assert got is None
+    assert set(info) == set(before) and info["NRepetitions"] == before["NRepetitions"]

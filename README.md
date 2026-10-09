@@ -182,6 +182,19 @@ cache and are not part of the cache key):
   (4 GiB limit) the plain reconstruction fits with smaller chunks; with
   `estimate_k0` it stops and offers a limit of 5.3 GB. The estimate is at or
   above every measurement, by up to 2 x.
+- `allow_short_fid`: bool (default: true). A scan stopped before its last
+  repetition leaves a FID shorter than `PVM_NRepetitions` frames need. The
+  hook measures the FID first; when it is short, it logs one warning (bytes
+  found, bytes the parameters need, bytes missing, complete frames out of the
+  planned ones) and reconstructs the complete frames only, so the output has
+  fewer frames than the parameters say (the NIfTI frame count is the number
+  of frames returned; voxel size, affine and TR are unchanged). The bytes of
+  the incomplete last frame are not used. `offset` and `num_frames` count
+  within the complete frames. It stops with a `ValueError` when no frame is
+  complete or `offset` is at or after the last complete frame. With `false`
+  a short FID stops with a `ValueError` before anything is reconstructed, as
+  earlier versions stopped (they stopped during the reconstruction). A FID of
+  the planned size or longer is read as before.
 
 `brkraw_sordino.get_dataobj_info(scan, reco_id, **options)` returns the same
 estimate without reading data, for callers that decide before loading. It
@@ -211,6 +224,10 @@ reconstruction options) and returns a dict with these keys:
 - `limit_nbytes`, `limit_source`: the memory limit that `get_dataobj`
   applies, and where it comes from (`max_memory_gb option`,
   `half of physical memory` or `fallback 4 GB`).
+- `frames_planned`, `fid_short_nbytes`: frames in the parameters
+  (`PVM_NRepetitions`), and the bytes the FID is short of them (0 when the FID
+  is complete, null when its size or the frame count cannot be read). With a short FID,
+  `frames_reconstructed` is the number of complete frames.
 
 Boolean values are read case-insensitively: `true`, `True`, `TRUE`, `false`,
 `False` (also `1`, `0`, `yes`, `no`, `on`, `off`), from YAML or from
@@ -226,6 +243,11 @@ is ignored with a one-line warning.
   ZTE gap over one unit, debug otherwise) and kept as `scan._sordino_recon_meta["kspace_gap"]`
   and in the recon cache `.json`. With `estimate_k0`, `scan._sordino_recon_meta["k0"]` and the
   cache `.json` also hold the estimated K0 (`[real, imag]` per channel, for every frame).
+- A short FID (see `allow_short_fid`) is kept with the result as
+  `scan._sordino_recon_meta["short_fid"]` and in the recon cache `.json`:
+  `fid_nbytes`, `expected_nbytes`, `frame_nbytes`, `frames_planned`,
+  `frames_complete` (null for a complete FID). Its recon cache is separate
+  from the cache of the complete scan.
 - Converted NIfTI outputs apply slope/intercept scaling for uint16 storage.
 - `ext_factors` keeps every object where it was: the affine keeps the voxel size and
   direction and moves the origin by `-(N // 2 - N0 // 2)` voxels on each output axis

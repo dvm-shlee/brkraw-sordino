@@ -111,8 +111,10 @@ def _get_cache_dir(path: Optional[Union[str, Path]]) -> Path:
 
 #: Read-time options (WI-0071): they choose what get_dataobj returns from the
 #: recon cache and how much memory it may use, so they are not part of
-#: ``Options`` and not part of the recon cache key.
-READ_KEYS = ("frames", "axis", "max_memory_gb")
+#: ``Options`` and not part of the recon cache key. ``allow_short_fid``
+#: (WI-0109) only decides whether a short FID stops the run; the frames kept
+#: from it are in ``recon_info`` (and so in the key) either way.
+READ_KEYS = ("frames", "axis", "max_memory_gb", "allow_short_fid")
 #: Names accepted for the frame axis (the repetition axis, data axis 3).
 FRAME_AXIS_NAMES = ("cycle", "repetition")
 
@@ -307,6 +309,105 @@ def _get_fid_entry(scan: Any) -> FileIO:
     return cast(FileIO, fid_entry)
 
 
+def _fid_nbytes(fid_entry: Any) -> Optional[int]:
+    """Size of the FID in bytes, or None when it cannot be read (WI-0109).
+
+    A zip member's size comes from the archive directory (nothing is
+    decompressed); any other entry is opened and its end position is read (a
+    zip member stream reports the size it was opened with, since seeking to its
+    end would decompress it).
+    """
+    if fid_entry is None:
+        return None
+    zipobj = getattr(fid_entry, "zipobj", None)
+    arcname = getattr(fid_entry, "arcname", None)
+    if zipobj is not None and arcname is not None:
+        try:
+            return int(zipobj.getinfo(arcname).file_size)
+        except Exception:
+            return None
+    opener = getattr(fid_entry, "open", None)
+    if opener is None:
+        return None
+    try:
+        with opener() as handle:
+            known = getattr(handle, "_orig_file_size", None)      # zipfile.ZipExtFile
+            if isinstance(known, int):
+                return known
+            handle.seek(0, os.SEEK_END)
+            return int(handle.tell())
+    except Exception:
+        return None
+
+
+def _check_fid_size(scan: Any, recon_info: Dict[str, Any], fid_entry: Any, size: Optional[int],
+                    options: Options, allow_short: bool) -> Optional[Dict[str, int]]:
+    """Keep the complete frames of a FID shorter than the parameters say (WI-0109).
+
+    A scan stopped before its last repetition leaves a FID with fewer bytes than
+    ``PVM_NRepetitions`` frames need. When the size can be read and is short,
+    ``recon_info["NRepetitions"]`` becomes the number of complete frames (the
+    planned number is kept as ``NRepetitionsPlanned``), so the reconstruction,
+    spoke-timing correction, size report, frame selection and cache key all use
+    the frames that exist, and one warning says what is missing. The bytes of
+    the incomplete last frame are not used. ``size`` is ``_fid_nbytes(fid_entry)``.
+    Returns those facts, or None when the FID is complete, longer, of unknown
+    size, or the parameters do not give the frame size or count (then nothing
+    changes and the reconstruction meets the FID as before).
+
+    Stops with ``ValueError`` when no frame is complete, when ``offset`` is at
+    or after the last complete frame, or when ``allow_short`` is false (the stop
+    of earlier versions, now before anything is reconstructed).
+    """
+    if size is None or recon_info.get("NRepetitions") is None:
+        return None
+    try:
+        fid_shape, fid_dtype = parse_fid_info(recon_info)
+        frame_nbytes = int(np.prod(fid_shape)) * np.dtype(fid_dtype).itemsize
+        planned = int(recon_info["NRepetitions"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if frame_nbytes <= 0 or planned <= 0:
+        return None
+    expected = frame_nbytes * planned
+    if size >= expected:
+        return None
+    complete = size // frame_nbytes
+    rest = size - complete * frame_nbytes
+    facts = (f"the FID holds {size:,} bytes; the parameters need {expected:,} bytes "
+             f"({planned} frames of {frame_nbytes:,} bytes), so {expected - size:,} bytes "
+             f"are missing (the acquisition stopped early?)")
+    if complete == 0:
+        raise ValueError(f"sordino: {facts}: no complete frame to reconstruct.")
+    tail = (f"the last {rest:,} bytes (an incomplete frame) are not used" if rest
+            else "no incomplete frame is left over")
+    if not allow_short:
+        raise ValueError(f"sordino: {facts}; only {complete} of {planned} frames are complete. "
+                         "Stopped because allow_short_fid=false; leave it out (or set it true) "
+                         "to reconstruct the complete frames.")
+    offset = int(options.offset or 0)
+    if offset >= complete:
+        raise ValueError(f"sordino: {facts}; only {complete} of {planned} frames are complete, "
+                         f"so offset {offset} is at or after the last complete frame.")
+    recon_info["NRepetitionsPlanned"] = planned
+    recon_info["NRepetitions"] = complete
+    notes = ""
+    if options.correct_spoketiming and planned > 1 and complete == 1:
+        notes = " With one frame the spoke-timing correction (2 or more frames) is skipped."
+    key = (_get_fid_identity(fid_entry), size, planned)
+    if getattr(scan, "_sordino_short_fid_warned", None) != key:
+        logger.warning("sordino: the FID is short: %s. Reconstructing the %s complete frame(s) "
+                       "(%s of %s); %s. Set allow_short_fid=false to stop instead.%s",
+                       facts, complete, complete, planned, tail, notes)
+        try:
+            setattr(scan, "_sordino_short_fid_warned", key)
+        except Exception:
+            pass
+    return {"fid_nbytes": int(size), "expected_nbytes": int(expected),
+            "frame_nbytes": int(frame_nbytes), "frames_planned": planned,
+            "frames_complete": int(complete)}
+
+
 def _is_frame_axis(axis: Any) -> bool:
     if isinstance(axis, bool):
         return False
@@ -458,6 +559,11 @@ def _plan(scan: Any, reco_id: Optional[int], kwargs: Dict[str, Any]) -> Dict[str
     recon_info = _parse_recon_info(scan)
     options = _resolve_k0(options, recon_info)
     fid_entry = _get_fid_entry(scan)
+    frames_planned = recon_info.get("NRepetitions")
+    # a short FID (WI-0109): NRepetitions becomes the complete frames, before the cache key
+    fid_nbytes = _fid_nbytes(fid_entry)
+    short_fid = _check_fid_size(scan, recon_info, fid_entry, fid_nbytes, options,
+                                parse_bool("allow_short_fid", kwargs.get("allow_short_fid", True)))
     cache_params = _build_cache_params(scan, reco_id, fid_entry, options, recon_info)
     img_cache_path = build_recon_cache_path(options.cache_dir, cache_params)
     img_meta = _load_cache_meta(_cache_meta_path(img_cache_path))
@@ -484,8 +590,14 @@ def _plan(scan: Any, reco_id: Optional[int], kwargs: Dict[str, Any]) -> Dict[str
                         cached=cached, cache_path=img_cache_path,
                         max_memory_gb=kwargs.get("max_memory_gb"),
                         stc_cache_path=build_spoketiming_cache_path(options.cache_dir, cache_params))
+    info["frames_planned"] = frames_planned
+    if short_fid is not None:
+        info["fid_short_nbytes"] = short_fid["expected_nbytes"] - short_fid["fid_nbytes"]
+    else:
+        info["fid_short_nbytes"] = None if fid_nbytes is None or frames_planned is None else 0
     return {
         "options": options, "recon_info": recon_info, "fid_entry": fid_entry,
+        "short_fid": short_fid,
         "cache_params": cache_params, "img_cache_path": img_cache_path, "img_meta": img_meta,
         "cached_dtype": cached_dtype if cached else None,
         "cached_shape": cached_shape if cached else None,
@@ -538,6 +650,8 @@ def get_dataobj(
     except Exception:
         setattr(scan, "_sordino_spatial_shape", None)
     recon_meta = _recon_metadata(recon_info, options)
+    # a short FID (WI-0109): the planned and complete frames, with the result
+    recon_meta["short_fid"] = plan["short_fid"]
     setattr(scan, "_sordino_recon_meta", recon_meta)
     setattr(scan, "_sordino_dataobj_info", info)
     memguard.check(info)
@@ -651,6 +765,7 @@ def get_dataobj(
                 "shape": list(cached_shape),
                 "kspace_gap": recon_meta["kspace_gap"],
                 "k0": recon_meta["k0"],
+                "short_fid": recon_meta["short_fid"],
             },
         )
     else:
