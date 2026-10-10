@@ -20,6 +20,7 @@ from brkraw.apps.loader.helper import get_affine as get_affine_helper
 from numpy.typing import NDArray
 from .typing import Options
 from .boolopt import parse_bool
+from . import frames as frames_mod
 from . import kcentre
 from .traj import get_trajectory, trajectory_rows  # noqa: F401  (get_trajectory: tests patch it)
 from .recon import (
@@ -135,7 +136,7 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         "split_ch",
         "as_complex",
         "estimate_k0",
-    } | set(READ_KEYS)
+    } | set(READ_KEYS) | set(frames_mod.FRAME_KEYS)
     unknown_keys = sorted(set(kwargs.keys()) - known_keys)
     if unknown_keys:
         removed = [key for key in unknown_keys if key in ("ramp_model", "correct_phase")]
@@ -167,6 +168,9 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         cache_dir=cache_dir,
         as_complex=parse_bool("as_complex", kwargs.get("as_complex", False)),
         estimate_k0=estimate_k0,
+        frame_spokes=frames_mod.parse_frame_spokes(kwargs.get("frame_spokes")),
+        frame_step=frames_mod.parse_frame_step(kwargs.get("frame_step")),
+        frame_accumulate=parse_bool("frame_accumulate", kwargs.get("frame_accumulate", False)),
     )
 
 
@@ -248,9 +252,13 @@ def _build_cache_params(
     fid_entry: FileIO,
     options: Options,
     recon_info: Dict[str, Any],
+    frame_plan: Any = None,
 ) -> Dict[str, Any]:
-    keyed = {k: v for k, v in asdict(options).items() if k not in RECON_KEY_EXCLUDED}
-    return {
+    # the frame options enter through the resolved frame plan (WI-0113 CP3), so a key
+    # without frames (one repetition per frame) is the key from before CP3
+    keyed = {k: v for k, v in asdict(options).items()
+             if k not in RECON_KEY_EXCLUDED and k not in frames_mod.FRAME_KEYS}
+    params = {
         "scan_id": getattr(scan, "scan_id", None),
         "reco_id": reco_id,
         "fid": _get_fid_identity(fid_entry),
@@ -258,6 +266,17 @@ def _build_cache_params(
         "recon_info": recon_info,
         "timing_tuning": {k: asdict(v) for k, v in TIMING_TUNING.items()},
     }
+    if frame_plan is not None:
+        params["frames"] = frame_plan.key()
+    return params
+
+
+def _result_shape(recon_info: Dict[str, Any], options: Options, frame_plan: Any = None) -> list:
+    """Shape of the recon cache: ``get_dataobj_shape``, with the plan's frames (WI-0113 CP3)."""
+    shape = list(get_dataobj_shape(recon_info, options))
+    if frame_plan is not None:
+        shape[-1] = int(frame_plan.n_frames)
+    return shape
 
 
 def _cache_meta_path(path: Path) -> Path:
@@ -570,7 +589,8 @@ def _plan(scan: Any, reco_id: Optional[int], kwargs: Dict[str, Any]) -> Dict[str
     fid_nbytes = _fid_nbytes(fid_entry)
     short_fid = _check_fid_size(scan, recon_info, fid_entry, fid_nbytes, options,
                                 parse_bool("allow_short_fid", kwargs.get("allow_short_fid", True)))
-    cache_params = _build_cache_params(scan, reco_id, fid_entry, options, recon_info)
+    frame_plan = frames_mod.make_plan(recon_info, options)
+    cache_params = _build_cache_params(scan, reco_id, fid_entry, options, recon_info, frame_plan)
     img_cache_path = build_recon_cache_path(options.cache_dir, cache_params)
     img_meta = _load_cache_meta(_cache_meta_path(img_cache_path))
     cached_dtype: Optional[np.dtype] = None
@@ -588,7 +608,7 @@ def _plan(scan: Any, reco_id: Optional[int], kwargs: Dict[str, Any]) -> Dict[str
             cached_dtype = None
             cached_shape = None
     cached = cached_dtype is not None and bool(cached_shape)
-    shape_for_plan = cached_shape if cached else list(get_dataobj_shape(recon_info, options))
+    shape_for_plan = cached_shape if cached else _result_shape(recon_info, options, frame_plan)
     frame_list, keep_axis = _frame_selection(kwargs.get("axis"), kwargs.get("frames"),
                                              int(shape_for_plan[-1]))
     info = _output_info(recon_info, options, shape_for_plan,
@@ -608,6 +628,7 @@ def _plan(scan: Any, reco_id: Optional[int], kwargs: Dict[str, Any]) -> Dict[str
         "cached_dtype": cached_dtype if cached else None,
         "cached_shape": cached_shape if cached else None,
         "frame_list": frame_list, "keep_axis": keep_axis, "info": info,
+        "frame_plan": frame_plan,
     }
 
 
@@ -658,6 +679,10 @@ def get_dataobj(
     recon_meta = _recon_metadata(recon_info, options)
     # a short FID (WI-0109): the planned and complete frames, with the result
     recon_meta["short_fid"] = plan["short_fid"]
+    frame_plan = plan["frame_plan"]
+    recon_meta["frames"] = None if frame_plan is None else frame_plan.describe()
+    if frame_plan is not None and options.estimate_k0:
+        recon_meta["frames"]["k0_scope"] = "all spokes read"
     setattr(scan, "_sordino_recon_meta", recon_meta)
     setattr(scan, "_sordino_dataobj_info", info)
     memguard.check(info)
@@ -751,6 +776,11 @@ def get_dataobj(
                             chunk_spokes=chunk_spokes,
                             k0_method=info.get("recon_k0_method"),
                         )
+                elif frame_plan is not None:
+                    dtype = frames_mod.recon_frames(
+                        fid_fobj, traj, recon_info, img_fobj, options, frame_plan,
+                        phase_factor=phase_factor, virtual_traj=virtual_traj, k0_out=k0_frames,
+                        chunk_spokes=chunk_spokes, k0_method=info.get("recon_k0_method"))
                 else:
                     logger.debug("Spoketiming correction disabled.")
                     dtype = recon_dataobj(fid_fobj, traj, recon_info, img_fobj, options,
@@ -761,7 +791,7 @@ def get_dataobj(
             os.replace(img_temp_path, img_cache_path)
         if options.estimate_k0:
             recon_meta["k0"] = [[[float(k.real), float(k.imag)] for k in frame] for frame in k0_frames]
-        dataobj_shape = list(get_dataobj_shape(recon_info, options))
+        dataobj_shape = _result_shape(recon_info, options, frame_plan)
         cached_dtype = np.dtype(dtype)
         cached_shape = list(dataobj_shape)
         _write_cache_meta(
@@ -781,7 +811,7 @@ def get_dataobj(
                         "(k-space centre estimated).")
 
     if cached_shape is None:
-        cached_shape = list(get_dataobj_shape(recon_info, options))
+        cached_shape = _result_shape(recon_info, options, frame_plan)
     assert cached_dtype is not None
     # Frame by frame into one result (WI-0071): magnitude unless as_complex, and the
     # channels combined (RSS of magnitudes, or the complex sum) unless split_ch.
