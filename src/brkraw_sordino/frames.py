@@ -148,6 +148,23 @@ class FramePlan:
         """Time between frames: ``frame_step`` x the spoke TR (D-0190 2); None without a TR."""
         return None if self.tr_ms is None else self.step * self.tr_ms * 1e-3
 
+    @property
+    def max_open(self) -> int:
+        """Most frame-start copies of the running sum the engine holds at one time (memory)."""
+        import bisect
+
+        last: Dict[int, int] = {}
+        for lo, hi in self.ranges:
+            last[lo] = hi
+        starts = sorted(last)
+        ends = sorted(last.values())
+        best = 0
+        for i, b in enumerate(starts):
+            # copies held just after the copy at start b: starts <= b whose last frame ends after b
+            # (a copy is freed at its last frame end, before a new copy is made at the same point)
+            best = max(best, (i + 1) - bisect.bisect_right(ends, b))
+        return best
+
     def key(self) -> Dict[str, Any]:
         """What decides the frame images (recon cache key)."""
         return {"unit": self.unit, "window": self.window, "step": self.step, "accumulate": self.accumulate}

@@ -259,6 +259,22 @@ def recon_nbytes(n_pro, n_points, n_receivers, volume_shape, *, estimate_k0=Fals
     return max(est, int(spoketiming_nbytes))
 
 
+def frames_nbytes(max_open, n_receivers, volume_shape, *, estimate_k0=False, n_pro=0,
+                  n_virtual=0) -> int:
+    """Image memory of the golden frame engine (``frames.recon_frames``, WI-0113 CP4).
+
+    The running sum, ``max_open`` copies of it at frame starts, and the frame being
+    written (two arrays), complex128 per channel; with ``estimate_k0`` also the
+    all-spoke adjoint of the solve and the predicted centre samples of one repetition.
+    The chunk and the K0 solve are in ``recon_plan``.
+    """
+    image = int(n_receivers) * int(math.prod(int(v) for v in volume_shape)) * 16
+    total = (int(max_open) + 2) * image
+    if estimate_k0:
+        total += image + int(n_receivers) * int(n_pro) * int(n_virtual) * 16
+    return int(total)
+
+
 def free_disk_bytes(path: Path) -> Optional[int]:
     try:
         return int(shutil.disk_usage(str(path)).free)
@@ -304,7 +320,7 @@ def check(info: Dict[str, Any]) -> None:
 
 __all__ = [
     "SordinoResourceError", "physical_memory_bytes", "memory_limit_bytes",
-    "recon_plan", "recon_nbytes", "serial_fixed_nbytes", "chunk_nbytes", "k0_fixed_nbytes",
+    "recon_plan", "recon_nbytes", "frames_nbytes", "serial_fixed_nbytes", "chunk_nbytes", "k0_fixed_nbytes",
     "k0_samples_nbytes", "k0_method",
     "free_disk_bytes", "check",
 ]

@@ -483,7 +483,8 @@ def _oriented_spatial_shape(vol_shape, recon_info: Dict[str, Any]) -> list:
 def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cache_dtype,
                  frame_list: Optional[list], keep_axis: bool, *, cached: bool,
                  cache_path: Path, max_memory_gb: Any,
-                 stc_cache_path: Optional[Path] = None) -> Dict[str, Any]:
+                 stc_cache_path: Optional[Path] = None,
+                 frame_plan: Any = None) -> Dict[str, Any]:
     """What get_dataobj would return and need, before reading anything (C9, WI-0071)."""
     from . import memguard
 
@@ -548,6 +549,16 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
         n_chunks = plan["n_chunks"]
         k0_solve = plan["k0_method"]          # estimate_k0: "samples" or "toeplitz" (WI-0099, D-0143)
         k0_reason = plan["k0_reason"]         # "limit": only the sample solve fits (D-0147)
+        if frame_plan is not None:
+            # golden frames (WI-0113 CP4): the running sum, the copies held at frame starts and
+            # the frame written, on top of the serial chunk
+            n_virtual = 0
+            if options.estimate_k0:
+                from .kcentre import leading_points
+                n_virtual = int(leading_points(recon_info, options.ignore_samples or 1).shape[1])
+            recon_share += memguard.frames_nbytes(
+                frame_plan.max_open, n_ch, vol, estimate_k0=bool(options.estimate_k0),
+                n_pro=int(recon_info["NPro"]), n_virtual=n_virtual)
     info: Dict[str, Any] = {
         "shape": shape,
         "dtype": real_dt.str,
@@ -566,6 +577,7 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
         "recon_chunks": n_chunks,
         "recon_k0_method": k0_solve,
         "recon_k0_reason": k0_reason,
+        "recon_frames_open": None if frame_plan is None else int(frame_plan.max_open),
         "disk_nbytes": disk_nbytes,
         "disk_free_nbytes": None if cached else memguard.free_disk_bytes(Path(options.cache_dir)),
     }
@@ -615,7 +627,8 @@ def _plan(scan: Any, reco_id: Optional[int], kwargs: Dict[str, Any]) -> Dict[str
                         cached_dtype if cached else RECON_CACHE_DTYPE, frame_list, keep_axis,
                         cached=cached, cache_path=img_cache_path,
                         max_memory_gb=kwargs.get("max_memory_gb"),
-                        stc_cache_path=build_spoketiming_cache_path(options.cache_dir, cache_params))
+                        stc_cache_path=build_spoketiming_cache_path(options.cache_dir, cache_params),
+                        frame_plan=frame_plan)
     info["frames_planned"] = frames_planned
     if short_fid is not None:
         info["fid_short_nbytes"] = short_fid["expected_nbytes"] - short_fid["fid_nbytes"]
@@ -940,6 +953,27 @@ def _clear_cache_files(scan: Any, *, keep: Optional[Tuple[str, ...]] = None) -> 
     logger.debug("Cleared sordino cache files.")
 
 
+#: seconds -> NIfTI time unit
+_T_UNIT_FACTOR = {"sec": 1.0, "msec": 1e3, "usec": 1e6}
+
+
+def _set_frame_time(nii: Any, scan: Any, t_units: str) -> None:
+    """Golden frames (WI-0113 CP4, D-0190 2): pixdim[4] = frame_step x spoke TR, in ``t_units``.
+
+    Only for golden frames with a known TR; one repetition per frame keeps the header
+    as before.
+    """
+    meta = getattr(scan, "_sordino_recon_meta", None) or {}
+    frames_meta = meta.get("frames") if isinstance(meta, dict) else None
+    if not frames_meta or not frames_meta.get("frame_interval_s") or len(nii.shape) < 4:
+        return
+    factor = _T_UNIT_FACTOR.get(str(t_units))
+    if factor is None:
+        logger.warning("sordino: frame time not written: time unit %r is not sec, msec or usec.", t_units)
+        return
+    nii.header["pixdim"][4] = float(frames_meta["frame_interval_s"]) * factor
+
+
 def convert(
     scan: Any,
     dataobj: Union[np.ndarray, Tuple[np.ndarray, ...]],
@@ -966,6 +1000,7 @@ def convert(
             nii.header.set_xyzt_units(xyz_units, t_units)
         except Exception:
             pass
+        _set_frame_time(nii, scan, t_units)
         if override_header:
             for key, value in override_header.items():
                 if value is not None:

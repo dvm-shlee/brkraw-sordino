@@ -235,6 +235,77 @@ Boolean values are read case-insensitively: `true`, `True`, `TRUE`, `false`,
 (including the removed `ramp_model` and `correct_phase`, which have no alias)
 is ignored with a one-line warning.
 
+## Golden trajectories and frames
+
+The `sordino` sequence (from `sordino_260801`) chooses the spoke directions with
+the method parameter `TrajectoryMode`, and the hook reads it; there is no option:
+`Default` (the radial list), `GoldenSampling` (`goldensamp.c`: golden means cut
+into subsets of `NGoldenSpokesPerSubset` spokes, reordered in z-stacks) and
+`GoldenGridSampling` (`goldengrid.c`: one spoke per equal-area cell per grid
+frame, plus the opposite spoke with `GridMirror`). Older data without the key are
+`Default`. The spoke order is checked against `ACQ_O1_list` (a warning when it
+does not match).
+
+The golden lists do not use the Default-trajectory parameters ProUnderSampling,
+`Reorder`, `HalfAcquisition` or `DirectMode`. A golden protocol may still carry an
+old value (the phantom scans 11 and 17 of WI-0112 keep ProUnderSampling 3.6147
+from an earlier Default setting); it changes nothing here. ParaVision's online
+reconstruction (pdata/1) does use it for Golden Grid: the first 12,732 lines of
+scan 17's `traj` file are the Default list for that value, so pdata/1 of a golden
+scan is not a reference image.
+
+Frames (golden scans only):
+
+- `frame_spokes`: spokes per frame. Default: the method subset, the smallest
+  count that covers the sphere (`NGoldenSpokesPerSubset`; one grid frame, cells
+  x 2 with `GridMirror`). `subset` says the same, `repetition` gives one
+  repetition per frame (as a Default scan), an integer is a spoke count.
+- `frame_step`: spokes between frame starts (default: `frame_spokes`). Smaller
+  gives a sliding window; larger leaves spokes out.
+- `frame_accumulate`: every frame starts at the first spoke; frame k holds
+  `frame_spokes` + k x `frame_step` spokes (default step `frame_spokes`: 1, 2, 3
+  ... x `frame_spokes`). The start does not move.
+- The repetitions read (`offset`, `num_frames`) form one stream of spokes, so
+  windows, sliding windows and accumulation run across repetition boundaries
+  (an info line counts such frames).
+- Any spoke range can be reconstructed. A frame that starts or ends inside a
+  method subset gets a warning (its directions cover the sphere less evenly:
+  3,200 spokes of scan 11 had a largest gap of 4.50 degrees from inside a
+  subset, 3.58 degrees from a subset start).
+- Each frame has the brightness of a one-repetition image (scaled by NPro over
+  its spoke count); the frames are the 4th axis of the result and of the NIfTI.
+- NIfTI time step: pixdim[4] is `frame_step` x the spoke TR (`PVM_RepetitionTime`),
+  in the time unit asked for (with accumulation: the growth between frames).
+  The frame list (spoke ranges, frame centre times, interval) is in
+  `scan._sordino_recon_meta["frames"]`.
+- `estimate_k0` with frames: the k-space centre is estimated once from all
+  spokes read and used by every frame. A window estimate is far too low (scan
+  11: 3-4 % of the all-spoke value from 160 spokes, 26-29 % from 3,200). With
+  several repetitions this also removes repetition-to-repetition changes of the
+  filled centre.
+- `correct_spoketiming` cannot be combined with frames (it moves every spoke of
+  a repetition to one time point); use `frame_spokes: repetition` with it.
+- Size: the recon cache holds one complex128 volume per frame. The default for
+  scan 11 (288,000 spokes, 160-spoke subsets, 120^3) is 1,800 frames: 49.8 GB of
+  cache (46.4 GiB), 24.9 GB as float64 magnitude in memory, 6.2 GB as a uint16
+  NIfTI. The size check runs before anything is reconstructed and stops with
+  the sizes; ask for larger frames, fewer repetitions (`num_frames`) or
+  `frame_spokes: repetition`. A sliding window also holds one copy of the
+  running sum per open frame start (`frame_spokes` / `frame_step` copies).
+
+```bash
+brkraw convert /path/to/study -s 11 -r 1 \
+  --hook-arg sordino:frame_spokes=3200 \
+  --hook-arg sordino:frame_step=1600
+```
+
+```yaml
+hooks:
+  sordino:
+    frame_spokes: 3200      # 20 subsets of 160 spokes, 2 s at a TR of 0.625 ms
+    frame_accumulate: true  # frames of 3,200, 6,400, 9,600 ... spokes
+```
+
 ## Notes
 
 - The hook reconstructs data using an adjoint NUFFT and returns magnitude images by default.
@@ -242,7 +313,8 @@ is ignored with a one-line warning.
   (k-grid units, first acquired and first kept sample) is logged (info for a general
   ZTE gap over one unit, debug otherwise) and kept as `scan._sordino_recon_meta["kspace_gap"]`
   and in the recon cache `.json`. With `estimate_k0`, `scan._sordino_recon_meta["k0"]` and the
-  cache `.json` also hold the estimated K0 (`[real, imag]` per channel, for every frame).
+  cache `.json` also hold the estimated K0 (`[real, imag]` per channel, for every frame;
+  with golden frames one estimate for all frames).
 - A short FID (see `allow_short_fid`) is kept with the result as
   `scan._sordino_recon_meta["short_fid"]` and in the recon cache `.json`:
   `fid_nbytes`, `expected_nbytes`, `frame_nbytes`, `frames_planned`,
