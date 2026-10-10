@@ -253,11 +253,11 @@ from an earlier Default setting); it changes nothing here. ParaVision's online
 reconstruction (pdata/1) does use it for Golden Grid: the first 12,732 lines of
 scan 17's `traj` file are the Default list for that value, so pdata/1 of a golden
 scan is not a reference image. In the sequence version of those scans
-(`sordino_260801`) the same step also reached the acquisition: the first 12,732
-spokes of the Golden Grid scans (17, and 21 of the same session) were played
-along that Default list while `ACQ_O1_list` kept the golden receiver
-frequencies (their data fit the Default directions with that frequency
-difference, not the golden list; from spoke 12,732 on the list is golden). The
+(`sordino_260801`) the data show that the same list also reached the
+acquisition: the first 12,732 spokes of the Golden Grid scans (17, and 21 of the
+same session) fit the Default directions with the golden `ACQ_O1_list`
+frequencies, not the golden list; from spoke 12,732 on they fit the golden list
+(inferred from the data; ParaVision's internal order is not documented). The
 hook reconstructs every spoke along the golden list, so these first spokes are
 misplaced (4.4 % of such a scan; grid frames 0-49 of a frame series). They look
 like a movement of a few mm in the first 8 s; it is not motion.
