@@ -48,6 +48,10 @@ def _pipe_reference(traj, shape, virtual=None):
     dmax = k2.max() if virtual is None else max(k2.max(), np.square(virtual).sum(-1).max())
     scale = (k2.sum() / dmax) / w[:, n_v:].sum()
     w = w * scale
+    # run 5 rule: never above the |k|^2 / max weight of the same sample, then the same sum again
+    k2_all = k2 if virtual is None else np.concatenate([np.square(virtual).sum(-1), k2], axis=1)
+    w = np.minimum(w, k2_all.reshape(w.shape) / dmax)
+    w = w * ((k2.sum() / dmax) / w[:, n_v:].sum())
     return w[:, n_v:].reshape(-1), (None if virtual is None else w[:, :n_v].reshape(-1))
 
 
@@ -98,6 +102,26 @@ def test_weights_keep_the_brightness_of_the_k2_weights(tmp_path):
     k2 = serial.density(tr)
     assert sw.w.sum() == pytest.approx((k2 / k2.max()).sum(), rel=1e-12)
     assert np.all(sw.w > 0)
+
+
+def test_weights_are_capped_at_the_k2_rule(tmp_path):
+    """Pipe boosts sparsely covered samples (noise; scan 17's head got 15x the weight, run 5): the weight of a
+    sample is never above its |k|^2 / max weight; after the cap the sum is restored, so the largest ratio is the
+    restoring factor and it is reached by the capped samples."""
+    from brkraw_sordino import dcf
+
+    info = _golden_info(1, "GoldenGridSampling")
+    rows = trajectory_rows(info, _opts(tmp_path))
+    tr = rows.rows(0, rows.n_pro)[:, 1:]
+    k2 = serial.density(tr)
+    k2 = (k2 / k2.max()).reshape(rows.n_pro, -1)
+    sw = dcf.pipe_weights(rows, rows.n_pro, 1, SHAPE, 64)
+    ratio = sw.w / k2
+    top = ratio.max()                                   # the restoring factor, shared by every capped sample
+    assert 1.0 <= top < 1.5
+    assert np.isclose(ratio, top, rtol=1e-9, atol=0).sum() > 10
+    assert sw.w.sum() == pytest.approx(k2.sum(), rel=1e-12)
+    assert dcf.RULE["cap"] == "min(Pipe, |k|^2/max), then the same sum"
 
 
 def test_only_golden_modes_use_sample_weights():
