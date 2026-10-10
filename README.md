@@ -252,7 +252,15 @@ old value (the phantom scans 11 and 17 of WI-0112 keep ProUnderSampling 3.6147
 from an earlier Default setting); it changes nothing here. ParaVision's online
 reconstruction (pdata/1) does use it for Golden Grid: the first 12,732 lines of
 scan 17's `traj` file are the Default list for that value, so pdata/1 of a golden
-scan is not a reference image.
+scan is not a reference image. In the sequence version of those scans
+(`sordino_260801`) the same step also reached the acquisition: the first 12,732
+spokes of the Golden Grid scans (17, and 21 of the same session) were played
+along that Default list while `ACQ_O1_list` kept the golden receiver
+frequencies (their data fit the Default directions with that frequency
+difference, not the golden list; from spoke 12,732 on the list is golden). The
+hook reconstructs every spoke along the golden list, so these first spokes are
+misplaced (4.4 % of such a scan; grid frames 0-49 of a frame series). They look
+like a movement of a few mm in the first 8 s; it is not motion.
 
 Frames (golden scans; a Default scan with a spoke count):
 
@@ -288,7 +296,8 @@ Frames (golden scans; a Default scan with a spoke count):
   spokes read and used by every frame. A window estimate is far too low (scan
   11: 3-4 % of the all-spoke value from 160 spokes, 26-29 % from 3,200). With
   several repetitions this also removes repetition-to-repetition changes of the
-  filled centre.
+  filled centre. If the object moves during the scan, the one value is the
+  average over its positions.
 - `correct_spoketiming` cannot be combined with frames (it moves every spoke of
   a repetition to one time point); use `frame_spokes: repetition` with it.
 - Size: the recon cache holds one complex128 volume per frame. The default for
