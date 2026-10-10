@@ -59,6 +59,22 @@ def test_removed_and_unknown_keys_warn_once(tmp_path, caplog):
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
+def test_unknown_key_warning_is_short_and_mentions_removed_keys_only_when_given(tmp_path, caplog):
+    def warning_text(**kw):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="brkraw_sordino.hook"):
+            _opts(tmp_path, **kw)
+        warns = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warns) == 1
+        return warns[0]
+
+    plain = warning_text(t_units="s", xyz_units="mm")
+    assert plain == "sordino: ignoring unknown option(s): t_units, xyz_units"
+    legacy = warning_text(ramp_model="legacy", nonsense=1)
+    assert legacy.startswith("sordino: ignoring unknown option(s): nonsense, ramp_model")
+    assert "correct_ramptime now covers both" in legacy and "correct_phase" not in legacy
+
+
 def _info(version):
     from test_ramp_model import _info as info
     return info(version)

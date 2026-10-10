@@ -138,9 +138,10 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
     } | set(READ_KEYS)
     unknown_keys = sorted(set(kwargs.keys()) - known_keys)
     if unknown_keys:
-        logger.warning(
-            "Sordino hook: ignoring unknown option(s): %s (ramp_model and correct_phase "
-            "were removed; correct_ramptime now covers both)", ", ".join(unknown_keys))
+        removed = [key for key in unknown_keys if key in ("ramp_model", "correct_phase")]
+        hint = (f"\n  {' and '.join(removed)} {'was' if len(removed) == 1 else 'were'} removed; "
+                "correct_ramptime now covers both") if removed else ""
+        logger.warning("sordino: ignoring unknown option(s): %s%s", ", ".join(unknown_keys), hint)
     cache_dir = _get_cache_dir(kwargs.get("cache_dir"))
     logger.debug("Cache dir: %s", cache_dir)
     offreso_freqs = _normalize_offreso_freqs(kwargs.get("offreso_freqs"))
@@ -374,13 +375,12 @@ def _check_fid_size(scan: Any, recon_info: Dict[str, Any], fid_entry: Any, size:
         return None
     complete = size // frame_nbytes
     rest = size - complete * frame_nbytes
-    facts = (f"the FID holds {size:,} bytes; the parameters need {expected:,} bytes "
-             f"({planned} frames of {frame_nbytes:,} bytes), so {expected - size:,} bytes "
-             f"are missing (the acquisition stopped early?)")
+    facts = (f"the FID is short ({size:,} of {expected:,} bytes, {planned} frames of "
+             f"{frame_nbytes:,}; {expected - size:,} missing; the scan may have stopped early)")
     if complete == 0:
         raise ValueError(f"sordino: {facts}: no complete frame to reconstruct.")
-    tail = (f"the last {rest:,} bytes (an incomplete frame) are not used" if rest
-            else "no incomplete frame is left over")
+    tail = (f"the last {rest:,} bytes (an incomplete frame)" if rest
+            else "nothing (no incomplete frame is left over)")
     if not allow_short:
         raise ValueError(f"sordino: {facts}; only {complete} of {planned} frames are complete. "
                          "Stopped because allow_short_fid=false; leave it out (or set it true) "
@@ -393,12 +393,18 @@ def _check_fid_size(scan: Any, recon_info: Dict[str, Any], fid_entry: Any, size:
     recon_info["NRepetitions"] = complete
     notes = ""
     if options.correct_spoketiming and planned > 1 and complete == 1:
-        notes = " With one frame the spoke-timing correction (2 or more frames) is skipped."
+        notes = "\n  note      with one frame the spoke-timing correction (2 or more frames) is skipped"
     key = (_get_fid_identity(fid_entry), size, planned)
     if getattr(scan, "_sordino_short_fid_warned", None) != key:
-        logger.warning("sordino: the FID is short: %s. Reconstructing the %s complete frame(s) "
-                       "(%s of %s); %s. Set allow_short_fid=false to stop instead.%s",
-                       facts, complete, complete, planned, tail, notes)
+        logger.warning("sordino: the FID is short; the scan may have stopped early.\n"
+                       "  found     %s bytes\n"
+                       "  needed    %s bytes (%s frames of %s)\n"
+                       "  missing   %s bytes\n"
+                       "  using     %s of %s frames (the complete ones)\n"
+                       "  skipped   %s%s\n"
+                       "  (allow_short_fid=false stops here instead)",
+                       f"{size:,}", f"{expected:,}", planned, f"{frame_nbytes:,}",
+                       f"{expected - size:,}", complete, planned, tail, notes)
         try:
             setattr(scan, "_sordino_short_fid_warned", key)
         except Exception:
@@ -843,7 +849,7 @@ def get_affine(
         recon_info = _parse_recon_info(scan)
         shift = _ext_factor_shift(recon_info, options)
     except Exception as exc:  # header without Matrix/orientation: keep the brkraw affine
-        logger.warning("Sordino hook: ext_factors affine shift not applied (%s).", exc)
+        logger.warning("sordino: ext_factors affine shift not applied (%s).", exc)
         return affine
     affine_list = list(affine) if isinstance(affine, tuple) else [affine]
     new_affine_list = [_apply_ext_factor_affine(aff, shift) for aff in affine_list]

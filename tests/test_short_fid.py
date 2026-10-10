@@ -95,6 +95,9 @@ def test_short_fid_gives_the_complete_frames_and_warns(tmp_path, monkeypatch, ca
                    frame_nbytes // 3):
         assert f"{number:,}" in text, text
     assert "2 of 4" in text
+    assert text.startswith("sordino: the FID is short")
+    assert "allow_short_fid=false" in text
+    assert all(len(line) < 100 for line in text.splitlines()), text     # short lines
 
 
 @pytest.mark.parametrize("n_complete", [2, 3])
