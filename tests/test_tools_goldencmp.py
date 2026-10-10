@@ -125,6 +125,19 @@ def test_edge_width_needs_the_edge_inside_the_image():
         gc.edge_width(img, np.ones((8, 8, 8), dtype=bool), 0)
 
 
+def test_edge_sides_report_each_side_and_a_missing_edge():
+    img = _ramp_box(n=40, lo=10, hi=40, ramp=10.0)        # the + side runs out of the image
+    mask = gc.object_mask(_ramp_box(ramp=10.0))
+    sides = gc.edge_sides(img, mask, 0)
+    assert sides["-"]["width"] == pytest.approx(8.0, abs=1e-9)
+    assert sides["+"]["width"] is None and sides["+"]["lowest_fraction"] == pytest.approx(1.0)
+    with pytest.raises(ValueError, match="edge"):
+        gc.edge_width(img, mask, 0)
+    both = gc.edge_sides(_ramp_box(ramp=4.0), mask, 2)
+    assert both["+"]["width"] == pytest.approx(3.2, abs=1e-9)
+    assert both["-"]["width"] == pytest.approx(3.2, abs=1e-9)
+
+
 def test_compare_reports_the_criteria_numbers():
     ref, _ = _ball(seed=1)
     test, _ = _ball(seed=2)
