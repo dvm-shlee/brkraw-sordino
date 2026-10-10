@@ -336,7 +336,7 @@ def test_each_spoke_is_reconstructed_once(tmp_path, monkeypatch):
 
     monkeypatch.setattr(serial.Adjoint, "setpts", spy)
     plan, _ = _engine(tmp_path, info, fid, frame_spokes=200, frame_step=40)
-    assert sum(calls) == 800 * (N_POINTS - 1)     # samples: every spoke once, frames overlap 5 times
+    assert sum(calls) == 800          # every spoke once (setpts gets (spokes, samples, 3)), frames overlap 5 times
 
 
 # ------------------------------------------------------------------ estimate_k0 with frames (D-0191 4)
