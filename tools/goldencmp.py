@@ -94,15 +94,17 @@ def scaled_nrmse(test: Any, ref: Any, mask: Any) -> Tuple[float, float]:
 
 
 # ---------------------------------------------------------------- added by the parent (Park)
-def edge_width(image: Any, mask: Any, axis: int, low: float = 0.1, high: float = 0.9) -> float:
-    """Mean 10-90 % boundary width (voxels) of the central profile along ``axis``.
+def edge_sides(image: Any, mask: Any, axis: int, low: float = 0.1, high: float = 0.9) -> dict:
+    """Boundary width (voxels, 90 % to 10 % of the plateau) on each side of the central profile.
 
     The profile runs through the rounded centroid of ``mask`` along ``axis``; its
     plateau is the median magnitude at the profile points inside ``mask``. From
-    the centre outwards, on both sides, the first fall below ``high`` and below
-    ``low`` times the plateau are located by linear interpolation; the width is
-    their distance, averaged over the two sides. The same mask gives the same
-    line for every image compared (success criterion 4, WI-0113).
+    the centre outwards, the first fall below ``high`` and below ``low`` times the
+    plateau are located by linear interpolation. Returns ``{"+": side, "-": side}``
+    with ``width`` (None when an edge is not inside the image) and
+    ``lowest_fraction`` (lowest profile value from the centre to the image end on
+    that side, as a fraction of the plateau). The same mask gives the same line for
+    every image compared (success criterion 4, WI-0113).
     """
     mag = np.abs(np.asarray(image))
     m = np.asarray(mask, dtype=bool)
@@ -116,8 +118,8 @@ def edge_width(image: Any, mask: Any, axis: int, low: float = 0.1, high: float =
     if not inside.any():
         raise ValueError("the mask does not cross the central line (empty)")
     plateau = float(np.median(prof[inside]))
-    widths = []
-    for step in (1, -1):
+    out = {}
+    for name, step in (("+", 1), ("-", -1)):
         crossings = []
         for level in (high * plateau, low * plateau):
             x = int(c[axis])
@@ -130,11 +132,22 @@ def edge_width(image: Any, mask: Any, axis: int, low: float = 0.1, high: float =
                     found = x + step * frac
                     break
                 x = nxt
-            if found is None:
-                raise ValueError(f"no edge below {level:.3g} on axis {axis} inside the image")
             crossings.append(found)
-        widths.append(abs(crossings[1] - crossings[0]))
-    return float(np.mean(widths))
+        side = prof[int(c[axis]):] if step == 1 else prof[:int(c[axis]) + 1]
+        width = None if None in crossings else abs(crossings[1] - crossings[0])
+        out[name] = {"width": width, "lowest_fraction": float(side.min() / plateau),
+                     "plateau": plateau, "centre": [int(v) for v in c]}
+    return out
+
+
+def edge_width(image: Any, mask: Any, axis: int, low: float = 0.1, high: float = 0.9) -> float:
+    """Mean of the two ``edge_sides`` widths along ``axis``; ValueError when one is not inside the image."""
+    sides = edge_sides(image, mask, axis, low, high)
+    for name, side in sides.items():
+        if side["width"] is None:
+            raise ValueError(f"no edge on the {name} side of axis {axis} inside the image "
+                             f"(lowest {side['lowest_fraction']:.3g} of the plateau)")
+    return float(np.mean([sides["+"]["width"], sides["-"]["width"]]))
 
 
 def compare(test: Any, ref: Any) -> dict:
