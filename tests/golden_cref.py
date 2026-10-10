@@ -2,7 +2,9 @@
 
 Reference for tests only: scalar loops with ``math`` (the C library functions), in
 the order of the C statements, so that the vectorised ``brkraw_sordino.golden``
-can be checked against it. Source: sequence ``sordino_260801``
+can be checked against it. One departure is named where it is: with
+``GoldenReorder=No`` and NPro below the generated count, C writes past the end
+of the list; the copy keeps the first NPro values. Source: sequence ``sordino_260801``
 ``goldensamp.c`` (``GenerateGoldenSamples``, ``ReorderGoldenSamples``),
 ``goldengrid.c`` (``GenerateSreagGrid``, ``UpdateCellsGoldenPercell``,
 ``GenerateSreagTrajectory``), ``backbone.c`` (``UpdateGoldenStepsRange``,
@@ -106,6 +108,11 @@ def reorder_golden_samples(n_subsets, n_spokes_per_subset, zstack_angle_deg, use
             unplaced += n_spokes_per_subset - spoke_n
             subset_n += 1
     else:
+        # The one departure from the C statements: C calls
+        # GenerateGoldenSamples(nSpokes, Out1, Out2, Out3, theta) on arrays of NPro values,
+        # so with NPro < nSpokes it writes past their end (undefined behaviour in C). The
+        # copy writes only the first NPro values, which are what the list holds; with
+        # NPro > nSpokes the tail keeps InitBeforeAcquisition's zeros, as in C.
         g1, g2, g3, _ = generate_golden_samples(n_spokes)
         for i in range(min(n_spokes, n_pro)):
             out1[i], out2[i], out3[i] = g1[i], g2[i], g3[i]
