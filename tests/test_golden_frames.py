@@ -153,12 +153,41 @@ def test_estimate_k0_is_allowed_with_frames(tmp_path):
     assert p.n_frames == 20
 
 
-def test_default_trajectory_refuses_frame_options(tmp_path):
-    from test_serial_recon import _info as serial_info
-    for kw in ({"frame_spokes": 100}, {"frame_spokes": "subset"}, {"frame_accumulate": True},
-               {"frame_step": 100}):
-        with pytest.raises(ValueError, match="TrajectoryMode"):
-            _plan(serial_info(1, 1, phase=False), tmp_path, **kw)
+def test_default_trajectory_takes_a_spoke_count(tmp_path, caplog):
+    # D-0194 1: frames and accumulation by a user spoke count also for the Default list
+    from test_serial_recon import N_PRO, _info as serial_info
+    info = serial_info(1, 1, phase=False)
+    with caplog.at_level(logging.WARNING, logger="brkraw_sordino.frames"):
+        p = _plan(info, tmp_path, frame_spokes=100)
+    assert p.unit == 1 and p.ranges[1] == (100, 200) and p.misaligned == 0
+    assert "part of the sphere" in caplog.text
+    a = _plan(info, tmp_path, frame_spokes=160, frame_accumulate=True)
+    assert a.ranges[0] == (0, 160) and a.ranges[-1] == (0, N_PRO)
+    s = _plan(info, tmp_path, frame_step=N_PRO // 2)          # repetition-long sliding window
+    assert s.window == N_PRO and s.n_frames == 1
+    with pytest.raises(ValueError, match="TrajectoryMode Default"):
+        _plan(info, tmp_path, frame_spokes="subset")
+
+
+def test_accumulation_ends_with_every_spoke_read(tmp_path):
+    p = _plan(_golden_info(), tmp_path, frame_spokes=300, frame_accumulate=True)
+    assert p.ranges == ((0, 300), (0, 600), (0, 800))
+    assert p.scales == (800 / 300, 800 / 600, 1.0)
+    q = _plan(_golden_info(), tmp_path, frame_spokes=300)        # side by side: the rest is in no frame
+    assert q.ranges == ((0, 300), (300, 600))
+
+
+def test_default_trajectory_frames_equal_direct(tmp_path):
+    from test_serial_recon import N_PRO, _info as serial_info
+    info = serial_info(1, 1, phase=True)
+    options = _opts(tmp_path / "t")
+    traj = get_trajectory(info, options)
+    factor = phase_correction_rows(info, options, N_POINTS)[:]
+    fid = b"".join(_fid_frames(info, traj, 1, 1, factor))
+    plan, imgs = _engine(tmp_path, info, fid, frame_spokes=160, frame_accumulate=True)
+    for k in (0, plan.n_frames - 1):
+        ref = _direct(tmp_path / f"d{k}", info, fid, _pieces(plan.ranges[k], N_PRO), plan.scales[k])
+        assert _rel(imgs[k], ref) < WINDOW_TOL
 
 
 def test_reorder_no_takes_any_spoke_count(tmp_path):
