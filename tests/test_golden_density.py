@@ -124,6 +124,22 @@ def test_weights_are_capped_at_the_k2_rule(tmp_path):
     assert dcf.RULE["cap"] == "min(Pipe, |k|^2/max), then the same sum"
 
 
+def test_uncapped_weights_for_diagnostics_are_mrinufft_pipe(tmp_path):
+    """``cap=False`` (diagnostics and figures only) is mrinufft's pipe scaled to the |k|^2 sum."""
+    from brkraw_sordino import dcf
+    from mrinufft.operators.interfaces.finufft import MRIfinufft
+
+    info = _golden_info(1, "GoldenGridSampling")
+    rows = trajectory_rows(info, _opts(tmp_path))
+    tr = rows.rows(0, rows.n_pro)[:, 1:]
+    sw = dcf.pipe_weights(rows, rows.n_pro, 1, SHAPE, 50, cap=False)
+    w = np.abs(np.asarray(MRIfinufft.pipe(np.ascontiguousarray(tr.reshape(-1, 3) / 0.5 * np.pi), tuple(SHAPE),
+                                         max_iter=10, osf=2, normalize=False)))
+    k2 = serial.density(tr)
+    w *= (k2 / k2.max()).sum() / w.sum()
+    assert _rel(sw.w.reshape(-1), w) < TOL
+
+
 def test_only_golden_modes_use_sample_weights():
     from brkraw_sordino import dcf
 
