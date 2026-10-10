@@ -77,9 +77,13 @@ def test_golden_scan_equals_the_whole_array_reference(tmp_path, monkeypatch, mod
     img = _hook_image(tmp_path / "h", monkeypatch, info, fid)[..., 0]
     vol = np.frombuffer(fid, dtype="<i4").reshape((2, N_POINTS, 1, info["NPro"]), order="F")
     k = ((vol[0] + 1j * vol[1]).T[:, 0, :]) * factor
-    ref = correct_orientation(nufft_adjoint(k[:, 1:], traj[:, 1:, :], SHAPE, 1), info)
+    # since WI-0113 run 5 (D-0197 decision 2) golden scans use the sample-based (Pipe-Menon)
+    # weights instead of |k|^2: the reference is the whole-array adjoint with mrinufft's pipe
+    from test_golden_density import _pipe_reference, _weighted_adjoint
+    w, _ = _pipe_reference(traj[:, 1:, :], SHAPE)
+    ref = correct_orientation(_weighted_adjoint(k[:, 1:], traj[:, 1:, :], SHAPE, w), info)
     assert img.shape == ref.shape
-    assert _rel(img, ref) < 1e-9
+    assert _rel(img, ref) < 1e-8
 
 
 def test_another_spoke_order_gives_another_image_and_a_warning(tmp_path, monkeypatch, caplog):
