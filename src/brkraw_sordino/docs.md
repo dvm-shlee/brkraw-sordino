@@ -257,10 +257,32 @@ scan is not a reference image. In the sequence version of those scans
 acquisition: the first 12,732 spokes of the Golden Grid scans (17, and 21 of the
 same session) fit the Default directions with the golden `ACQ_O1_list`
 frequencies, not the golden list; from spoke 12,732 on they fit the golden list
-(inferred from the data; ParaVision's internal order is not documented). The
-hook reconstructs every spoke along the golden list, so these first spokes are
-misplaced (4.4 % of such a scan; grid frames 0-49 of a frame series). They look
-like a movement of a few mm in the first 8 s; it is not motion.
+(inferred from the data; ParaVision's internal order is not documented). They
+look like a movement of a few mm in the first 8 s; it is not motion.
+
+Golden Grid head (automatic, a warning, no option): for a `GoldenGridSampling` scan
+with `GoldenSampTraj = No` the hook reconstructs the first N spokes of every
+repetition (N = the count `radialGrad3D` gives for the scan's ProUnderSampling,
+12,732 for scans 17 and 21) along that Default list, with the receiver-frequency
+difference between the golden `ACQ_O1_list` and those directions applied over the
+sample time. Which list the scan carries is read from its `traj` file (its first
+lines are the Default list: rule on; the golden list, as a fixed sequence would
+write: rule off). Without a `traj` file the rule applies only to `sordino_260801`.
+
+Density weights: golden scans use sample-based (Pipe-Menon, 10 iterations) weights
+of one repetition's actual sample positions instead of |k|^2. With the ramp model a
+golden spoke bends from the previous direction, unevenly in the Golden Grid order,
+and |k|^2 then leaves direction-dependent streaks. Each weight is capped at its
+|k|^2 weight (the weight of uniform radial sampling at that radius) and the sum is
+restored, so the weights only come down where curved spokes bunch; uncapped
+Pipe-Menon weights also raise thinly covered samples and their noise (phantom scan
+17: NRMSE to the Default scan 0.244 with |k|^2, 0.234 uncapped, 0.126 capped; scan 11:
+0.115, 0.157, 0.108). The weights are computed spoke chunk by spoke chunk (no whole
+trajectory), scaled to the brightness of the |k|^2 image, used by every frame and
+repetition (frames still add up to the repetition image) and by `estimate_k0`. They
+take one float64 per sample of a repetition (0.58 GB for a 288,000-spoke scan at
+matrix 120; in the size check) and about 30 s. Default scans keep |k|^2 and their
+cache keys.
 
 Frames (golden scans; a Default scan with a spoke count):
 
