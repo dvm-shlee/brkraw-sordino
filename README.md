@@ -254,7 +254,12 @@ reconstruction (pdata/1) does use it for Golden Grid: the first 12,732 lines of
 scan 17's `traj` file are the Default list for that value, so pdata/1 of a golden
 scan is not a reference image.
 
-Frames (golden scans only):
+Frames (golden scans; a Default scan with a spoke count):
+
+- A Default scan keeps one repetition per frame unless `frame_spokes` is a spoke
+  count (`subset` is refused: the Default list has no method subset). Its list goes
+  through the sphere in order, so a frame shorter than a repetition covers only part
+  of the sphere (a warning); accumulation then shows the coverage growing.
 
 - `frame_spokes`: spokes per frame. Default: the method subset, the smallest
   count that covers the sphere (`NGoldenSpokesPerSubset`; one grid frame, cells
@@ -264,7 +269,8 @@ Frames (golden scans only):
   gives a sliding window; larger leaves spokes out.
 - `frame_accumulate`: every frame starts at the first spoke; frame k holds
   `frame_spokes` + k x `frame_step` spokes (default step `frame_spokes`: 1, 2, 3
-  ... x `frame_spokes`). The start does not move.
+  ... x `frame_spokes`). The start does not move. The last accumulated frame always
+  holds every spoke read, also when the count is not a multiple of the step.
 - The repetitions read (`offset`, `num_frames`) form one stream of spokes, so
   windows, sliding windows and accumulation run across repetition boundaries
   (an info line counts such frames).

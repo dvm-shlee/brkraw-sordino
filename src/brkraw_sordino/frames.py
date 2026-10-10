@@ -1,6 +1,7 @@
 """Frames of golden-angle scans: method subsets, spoke counts, sliding windows, accumulation (WI-0113 CP3).
 
-Options (``TrajectoryMode`` GoldenSampling or GoldenGridSampling only; D-0184 2, D-0189 4, D-0190, D-0191):
+Options (golden trajectories, and since D-0194 the Default list with a spoke count; D-0184 2,
+D-0189 4, D-0190, D-0191, D-0194):
 
 * ``frame_spokes``: default (None) and ``"subset"`` are the method subset, the
   smallest spoke count that covers the sphere: ``NGoldenSpokesPerSubset`` for
@@ -191,28 +192,42 @@ def make_plan(recon_info: Dict[str, Any], options) -> Optional[FramePlan]:
     if not is_frame_mode(options, recon_info):
         return None
     mode = golden.trajectory_mode(recon_info)
-    if mode == "Default":
+    if mode == "Default" and options.frame_spokes == "subset":
         raise ValueError(
-            "sordino: frame_spokes, frame_step and frame_accumulate apply to golden trajectories only "
-            "(TrajectoryMode GoldenSampling or GoldenGridSampling). This scan has TrajectoryMode Default, "
-            "whose spokes cover the sphere only as a whole repetition.")
+            "sordino: frame_spokes='subset' needs a golden trajectory; this scan has TrajectoryMode Default, "
+            "which has no method subset. Give a spoke count (frame_spokes=<n>).")
     if getattr(options, "correct_spoketiming", False):
         raise ValueError(
             "sordino: correct_spoketiming cannot be used with golden frames: it moves every spoke of a "
             "repetition to one time point, so frames shorter than a repetition would all show that time. "
             "Use frame_spokes='repetition' with correct_spoketiming.")
-    unit = int(golden.golden_unit(recon_info))
+    unit = int(golden.golden_unit(recon_info) or 1)          # Default list: no method subset
     npro = int(recon_info["NPro"])
     n_rep = int(get_num_frames(recon_info, options))
     total = n_rep * npro
     fs = options.frame_spokes
-    window = unit if fs in (None, "subset") else npro if fs == "repetition" else int(fs)
+    if fs == "repetition" or (fs is None and mode == "Default"):
+        window = npro                                     # Default list: one repetition unless a count is given
+    elif fs in (None, "subset"):
+        window = unit
+    else:
+        window = int(fs)
     step = int(options.frame_step) if options.frame_step is not None else window
     accumulate = bool(options.frame_accumulate)
     if window > total:
         raise ValueError(f"sordino: frame_spokes {window} is more than the {total} spokes read "
                          f"({n_rep} repetition(s) of {npro}).")
     ranges = tuple(tuple(r) for r in frameplan.frame_ranges(total, window, step, accumulate))
+    if accumulate and ranges[-1][1] < total:
+        # the last accumulated frame holds every spoke read (D-0194 1: "until all spokes")
+        logger.info("sordino: the last accumulated frame holds all %s spokes read (%s more than the step "
+                    "before it).", total, total - ranges[-1][1])
+        ranges = ranges + ((0, total),)
+    if mode == "Default" and window < npro:
+        logger.warning(
+            "sordino: TrajectoryMode Default lists its spokes in sphere order, so a frame of %s spokes (fewer "
+            "than the %s of a repetition) covers only part of the sphere; such frames show the k-space "
+            "coverage growing, not whole images.", window, npro)
     ends = [hi for _, hi in ranges]
     assert all(b > a for a, b in zip(ends, ends[1:])), "frame ends must increase"
     scales = tuple(frameplan.frame_scales(ranges, npro))
