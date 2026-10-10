@@ -273,9 +273,10 @@ Density weights: golden scans use sample-based (Pipe-Menon, 10 iterations) weigh
 of one repetition's actual sample positions instead of |k|^2. With the ramp model a
 golden spoke bends from the previous direction, unevenly in the Golden Grid order,
 and |k|^2 then leaves direction-dependent streaks. Each weight is capped at its
-|k|^2 weight (the weight of uniform radial sampling at that radius) and the sum is
-restored, so the weights only come down where curved spokes bunch; uncapped
-Pipe-Menon weights also raise thinly covered samples and their noise (phantom scan
+|k|^2 weight (the weight of uniform radial sampling at that radius) and one common
+factor then restores the sum, so relative to |k|^2 the weights are clipped at one level
+(1.32 x for phantom scan 11, 1.91 x for scan 17) instead of reaching 6-22 x on thinly
+covered samples; uncapped Pipe-Menon weights raise those samples and their noise (phantom scan
 17: NRMSE to the Default scan 0.244 with |k|^2, 0.234 uncapped, 0.126 capped; scan 11:
 0.115, 0.157, 0.108). The weights are computed spoke chunk by spoke chunk (no whole
 trajectory), scaled to the brightness of the |k|^2 image, used by every frame and

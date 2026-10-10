@@ -21,9 +21,13 @@ k-space, which amplifies their noise. On scan 17 the 12,732 head spokes (Default
 times the per-spoke weight of the golden spokes and the image became noisy (NRMSE to scan 13
 0.234, |k|^2 0.244); on scan 11 the image got worse (0.157 against 0.115). So each sample's
 weight is capped at its |k|^2 / max weight, the weight of uniform radial sampling at that
-radius, and the sum is restored: Pipe only lowers the weight where curved spokes bunch (the
-streaks), it never extrapolates into thin coverage. Measured: 17 0.126, 11 0.108 (Dice 0.937,
-0.932; ``r5_cap.json``).
+radius, and then the whole set is multiplied by one factor lambda >= 1 that restores the sum.
+The final weights are lambda x min(Pipe, |k|^2/max): relative to |k|^2 they are clipped at one
+common level (lambda: 1.32 for scan 11, 1.91 for scan 17; 25 % and 19 % of the samples sit at
+it), so the uncapped tail (outer-shell ratios up to 6.6 and 21.6) is gone, while below the clip
+Pipe's relative profile (lower where curved spokes bunch) is kept. The common factor only
+scales the brightness. Measured: 17 0.126, 11 0.108 (Dice 0.937, 0.932; ``r5_cap.json``,
+``r5_lambda.json``).
 
 Scale: the weights are multiplied so that their sum over the measured samples equals
 the sum of |k|^2 / max over the same samples (max also over the virtual samples with
