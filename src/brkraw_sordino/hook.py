@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 from .typing import Options
 from .boolopt import parse_bool
 from . import frames as frames_mod
-from . import kcentre
+from . import dcf, golden, kcentre
 from .traj import get_trajectory, trajectory_rows  # noqa: F401  (get_trajectory: tests patch it)
 from .recon import (
     build_recon_cache_path,
@@ -203,7 +203,53 @@ def _parse_recon_info(scan):
     if not dtype_info or "dtype" not in dtype_info:
         raise ValueError("Failed to resolve FID dtype from acqp.")
     recon_info['FIDDataType'] = dtype_info["dtype"]
+    try:
+        mode = golden.trajectory_mode(recon_info)
+    except ValueError:
+        mode = None                       # an unknown mode stops later with its own message
+    if mode == "GoldenGridSampling":
+        recon_info["GoldenGridHead"] = _golden_grid_head(scan, recon_info)
     return recon_info
+
+
+def _golden_grid_head(scan: Any, recon_info: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``golden.grid_head`` from the scan's method and ``traj`` file (WI-0113 run 5, D-0197 decision 1).
+
+    Reads only the first lines of ``traj`` that the head could cover (12,732 x 120 x 3
+    float64 = 37 MB for scans 17 and 21). A ``traj`` file whose lines are not straight
+    spokes (largest misfit above ``golden.GRID_HEAD_TOL``) counts as missing.
+    """
+    from .trajfile import line_directions
+
+    method = getattr(scan, "method", None)
+    get = getattr(method, "get", None)
+    name = get("Method") if get else None
+    gst = get("GoldenSampTraj") if get else None
+    gst_yes = str(gst).strip().strip("<>").lower() in ("yes", "true", "1") if gst is not None else False
+    traj_dirs = None
+    try:
+        n = golden.default_head_count(int(recon_info["Matrix"][0]), float(recon_info["UnderSampling"]),
+                                      bool(recon_info["HalfAcquisition"]), bool(recon_info["UseOrigin"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.debug("Golden Grid head: no Default count (%s)", exc)
+        return {"applied": False, "n": 0, "source": "no ProUnderSampling", "method": golden.method_name(name)}
+    n = min(n, int(recon_info["NPro"]))
+    entry = None
+    if hasattr(scan, "iterdir"):
+        entry = next((f for f in scan.iterdir() if getattr(f, "name", None) == "traj"), None)
+    if entry is not None and n > 0:
+        mat = int(recon_info["Matrix"][0])
+        line_bytes = mat * 3 * 8
+        with entry.open() as fh:
+            data = fh.read(n * line_bytes)
+        lines = len(data) // line_bytes
+        if lines > 0:
+            dirs, fit = line_directions(data, mat, lines)
+            if fit <= golden.GRID_HEAD_TOL:
+                traj_dirs = dirs
+            else:
+                logger.debug("Golden Grid head: traj lines are not straight spokes (misfit %.3g)", fit)
+    return golden.grid_head(recon_info, method=name, golden_samp_traj=gst_yes, traj_dirs=traj_dirs)
 
 
 def _recon_metadata(recon_info: Dict[str, Any], options: Options) -> Dict[str, Any]:
@@ -268,6 +314,9 @@ def _build_cache_params(
     }
     if frame_plan is not None:
         params["frames"] = frame_plan.key()
+    if dcf.uses_sample_weights(recon_info):
+        # golden trajectories: sample-based density weights (WI-0113 run 5); Default keys unchanged
+        params["density"] = dict(dcf.RULE)
     return params
 
 
@@ -539,8 +588,16 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
     chunk_spokes = None
     n_chunks = None
     k0_solve = k0_reason = None
+    dcf_share = 0
+    if not cached and dcf.uses_sample_weights(recon_info):
+        # golden trajectories (WI-0113 run 5): the weights of one repetition are held throughout
+        n_kept = int(recon_info["NPoints"]) - int(options.ignore_samples or 1)
+        if options.estimate_k0:
+            from .kcentre import leading_points
+            n_kept += int(leading_points(recon_info, options.ignore_samples or 1).shape[1])
+        dcf_share = memguard.dcf_nbytes(int(recon_info["NPro"]), n_kept, vol)
     if not cached:
-        budget = int(limit["limit_nbytes"]) - read_nbytes
+        budget = int(limit["limit_nbytes"]) - read_nbytes - dcf_share
         plan = memguard.recon_plan(
             int(recon_info["NPro"]), int(recon_info["NPoints"]), n_ch, vol,
             estimate_k0=bool(options.estimate_k0), budget_nbytes=budget)
@@ -559,6 +616,7 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
             recon_share += memguard.frames_nbytes(
                 frame_plan.max_open, n_ch, vol, estimate_k0=bool(options.estimate_k0),
                 n_pro=int(recon_info["NPro"]), n_virtual=n_virtual)
+        recon_share += dcf_share
     info: Dict[str, Any] = {
         "shape": shape,
         "dtype": real_dt.str,
@@ -578,6 +636,7 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
         "recon_k0_method": k0_solve,
         "recon_k0_reason": k0_reason,
         "recon_frames_open": None if frame_plan is None else int(frame_plan.max_open),
+        "recon_dcf_nbytes": int(dcf_share),
         "disk_nbytes": disk_nbytes,
         "disk_free_nbytes": None if cached else memguard.free_disk_bytes(Path(options.cache_dir)),
     }
@@ -725,6 +784,16 @@ def get_dataobj(
                 if info.get("recon_k0_reason") == "limit":
                     logger.info("estimate_k0: the Toeplitz solve does not fit the memory limit; "
                                 "using the sample-based solve, which fits (slower).")
+            weights = None
+            if dcf.uses_sample_weights(recon_info):
+                # golden trajectories: Pipe-Menon weights of the actual samples (WI-0113 run 5, D-0197 2)
+                from .memguard import recon_plan
+                fid_shape0 = parse_fid_info(recon_info)[0]
+                vol0 = parse_volume_shape(recon_info, options)
+                cs = chunk_spokes or recon_plan(int(recon_info["NPro"]), int(fid_shape0[1]), int(fid_shape0[2]),
+                                                vol0, estimate_k0=virtual_traj is not None)["chunk_spokes"]
+                weights = dcf.pipe_weights(traj, int(recon_info["NPro"]), options.ignore_samples or 1, vol0, cs,
+                                           virtual_traj=virtual_traj)
             img_temp_path = img_cache_path.with_suffix(img_cache_path.suffix + ".partial")
             if img_temp_path.exists():
                 try:
@@ -788,19 +857,22 @@ def get_dataobj(
                             k0_out=k0_frames,
                             chunk_spokes=chunk_spokes,
                             k0_method=info.get("recon_k0_method"),
+                            weights=weights,
                         )
                 elif frame_plan is not None:
                     dtype = frames_mod.recon_frames(
                         fid_fobj, traj, recon_info, img_fobj, options, frame_plan,
                         phase_factor=phase_factor, virtual_traj=virtual_traj, k0_out=k0_frames,
-                        chunk_spokes=chunk_spokes, k0_method=info.get("recon_k0_method"))
+                        chunk_spokes=chunk_spokes, k0_method=info.get("recon_k0_method"),
+                        weights=weights)
                 else:
                     logger.debug("Spoketiming correction disabled.")
                     dtype = recon_dataobj(fid_fobj, traj, recon_info, img_fobj, options,
                                           phase_factor=phase_factor,
                                           virtual_traj=virtual_traj, k0_out=k0_frames,
                                           chunk_spokes=chunk_spokes,
-                                          k0_method=info.get("recon_k0_method"))
+                                          k0_method=info.get("recon_k0_method"),
+                                          weights=weights)
             os.replace(img_temp_path, img_cache_path)
         if options.estimate_k0:
             recon_meta["k0"] = [[[float(k.real), float(k.imag)] for k in frame] for frame in k0_frames]

@@ -288,12 +288,20 @@ class _Stream:
 
 
 def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, plan: FramePlan, *,
-                 phase_factor=None, virtual_traj=None, k0_out=None, chunk_spokes=None, k0_method=None):
+                 phase_factor=None, virtual_traj=None, k0_out=None, chunk_spokes=None, k0_method=None,
+                 weights=None, spoke_mask=None):
     """Write the frames of ``plan`` to ``img_fobj`` (the layout of ``recon_dataobj``); return their dtype.
 
     ``traj`` (``TrajectoryRows`` or an array), ``phase_factor`` (``PhaseRows`` or an array) and
     ``virtual_traj`` (``kcentre.leading_points``) are those of one repetition; the stream repeats
-    them. ``k0_out`` gets one list (one K0 per channel) for the whole stream.
+    them. ``k0_out`` gets one list (one K0 per channel) for the whole stream. ``weights``
+    (``dcf.SampleWeights`` of one repetition; golden trajectories, WI-0113 run 5) replace
+    |k|^2 / max for every repetition and frame.
+
+    ``spoke_mask`` (entry for WI-0118; not a user option): boolean array over the stream
+    (``n_rep * NPro``), True = use the spoke. Excluded spokes add nothing (their data are
+    zeroed before the adjoint); frame scales are unchanged. Not with ``virtual_traj``
+    (the K0 solve would still hold the excluded spokes): WI-0118 decides that case.
     """
     from . import memguard, serial
     from .recon import _row_source, correct_offreso, parse_fid_info, parse_volume_shape
@@ -304,6 +312,15 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
     n_points, n_rx, npro = (int(v) for v in fid_shape[1:])
     if npro != plan.npro:
         raise ValueError(f"frame plan is for {plan.npro} spokes per repetition, the FID has {npro}")
+    if spoke_mask is not None:
+        spoke_mask = np.asarray(spoke_mask, dtype=bool).reshape(-1)
+        if spoke_mask.size != plan.n_rep * npro:
+            raise ValueError(f"spoke_mask has {spoke_mask.size} values, the stream has {plan.n_rep * npro} spokes")
+        if virtual_traj is not None:
+            raise ValueError("spoke_mask with estimate_k0 is not supported yet (WI-0118 decides how the K0 solve "
+                             "leaves spokes out)")
+        if spoke_mask.all():
+            spoke_mask = None
     ign = getattr(options, "ignore_samples", None) or 1
     offset = getattr(options, "offset", None) or 0
     item = np.dtype(fid_dtype).itemsize
@@ -337,19 +354,27 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
         else:
             raise ValueError(f"k0_method must be None, 'toeplitz' or 'samples', not {k0_method!r}")
     dmax = 0.0
-    for lo, hi in serial.spoke_ranges(npro, chunk_spokes):
-        tr = rows(lo, hi)[:, ign:]
-        d = serial.density(tr)
-        dmax = max(dmax, float(d.max()))
-        if kernel is not None:
-            kernel.add(tr, d)
-        del tr, d
     w_virtual = None
-    if virtual_traj is not None:
-        dmax = max(dmax, float(serial.density(virtual_traj).max()))
-        kernel.finish(float(plan.n_rep) / dmax)
-        n_virtual = int(virtual_traj.shape[1])
-        w_virtual = (serial.density(virtual_traj) / dmax).reshape(npro, n_virtual)
+    if weights is None:
+        for lo, hi in serial.spoke_ranges(npro, chunk_spokes):
+            tr = rows(lo, hi)[:, ign:]
+            d = serial.density(tr)
+            dmax = max(dmax, float(d.max()))
+            if kernel is not None:
+                kernel.add(tr, d)
+            del tr, d
+        if virtual_traj is not None:
+            dmax = max(dmax, float(serial.density(virtual_traj).max()))
+            kernel.finish(float(plan.n_rep) / dmax)
+            n_virtual = int(virtual_traj.shape[1])
+            w_virtual = (serial.density(virtual_traj) / dmax).reshape(npro, n_virtual)
+    else:
+        if kernel is not None:
+            for lo, hi in serial.spoke_ranges(npro, chunk_spokes):
+                kernel.add(rows(lo, hi)[:, ign:], weights.chunk(lo, hi))
+        if virtual_traj is not None:
+            kernel.finish(float(plan.n_rep))
+            w_virtual = weights.virtual().reshape(npro, int(virtual_traj.shape[1]))
     nf = serial.norm_factor(vol)
     adj = serial.Adjoint(vol)
 
@@ -366,12 +391,14 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
                 if phase_factor is not None:
                     k = k * phase_factor[a:b][:, None, :]
                 k = k[..., ign:]
+                if spoke_mask is not None:
+                    k[~spoke_mask[r * npro + a:r * npro + b]] = 0.0
                 for ch in range(n_rx):
                     freq = _offreso(ch)
                     if freq is not None:
                         k[:, ch, :] = correct_offreso(k[:, ch, :], freq, eff_bandwidth=bw, over_sampling=osf)
                 tr = rows(a, b)[:, ign:]
-                w = serial.density(tr) / dmax
+                w = serial.density(tr) / dmax if weights is None else weights.chunk(a, b)
                 adj.setpts(tr)
                 del tr
                 for ch in range(n_rx):

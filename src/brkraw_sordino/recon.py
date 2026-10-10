@@ -199,9 +199,13 @@ class PhaseRows:
     whole (n_pro, n_points) factor is never held.
     """
 
-    def __init__(self, step_hz: np.ndarray, tau_s: np.ndarray):
+    def __init__(self, step_hz: np.ndarray, tau_s: np.ndarray, error_hz: Optional[np.ndarray] = None,
+                 time_s: Optional[np.ndarray] = None):
         self._d = np.asarray(step_hz, dtype=float)
         self._tau = np.asarray(tau_s, dtype=float)
+        # Golden Grid head (WI-0113 run 5): a receiver-frequency error per spoke over the sample time
+        self._e = None if error_hz is None else np.asarray(error_hz, dtype=float)
+        self._t = None if time_s is None else np.asarray(time_s, dtype=float)
 
     @property
     def shape(self) -> tuple:
@@ -211,14 +215,61 @@ class PhaseRows:
         return int(self._d.size)
 
     def __getitem__(self, idx) -> np.ndarray:
-        return np.exp(-2j * np.pi * np.outer(self._d[idx], self._tau)).astype(np.complex64)
+        if self._e is None:
+            return np.exp(-2j * np.pi * np.outer(self._d[idx], self._tau)).astype(np.complex64)
+        ph = np.outer(self._d[idx], self._tau) + np.outer(self._e[idx], self._t)
+        return np.exp(-2j * np.pi * ph).astype(np.complex64)
+
+
+def _grid_head_rows(recon_info: Dict[str, Any], n_points: int, ramp: bool) -> Optional[PhaseRows]:
+    """Phase rows of a Golden Grid scan whose head was played along the Default list (WI-0113 run 5).
+
+    The receiver frequencies (``ACQ_O1_list``) were set for the golden list; the head's
+    spokes ran along the Default list. O1_true = c + offset . direction (c and the offset
+    fitted to the golden list and the recorded values) on the head, the recorded value
+    elsewhere. The ramp term uses the steps of O1_true (``ramp`` False: none), and the
+    receiver error e = O1_true - O1_rec adds e * t_j (t_j: sample time from the RF centre).
+    This is model (c) of WI-0113 run 4 (``r4_head.json``), the only one of five that put the
+    head where the rest of the scan is.
+    """
+    from . import timing as timing_mod
+    from .traj import grid_head_length, grid_head_list, gradient_list
+
+    n = grid_head_length(recon_info)
+    o1 = np.asarray(recon_info.get("O1List_Hz") or [], dtype=float)
+    n_pro = int(recon_info.get("NPro") or 0)
+    if o1.size != n_pro or n_pro == 0:
+        logger.warning("Golden Grid head: no receiver-frequency correction (ACQ_O1_list has %s values, NPro "
+                       "is %s).", o1.size, n_pro)
+        return None
+    g, _ = gradient_list(recon_info)
+    a = np.concatenate([np.ones((g.shape[1], 1)), g.T], axis=1)
+    coef, *_ = np.linalg.lstsq(a, o1, rcond=None)
+    o1_true = o1.copy()
+    o1_true[:n] = coef[0] + grid_head_list(recon_info)[:, :n].T @ coef[1:]
+    seq = timing_mod.read_timing(recon_info)
+    tune = timing_mod.tuning_for(seq.version)
+    times_us, _, tau_us = timing_mod.ramp_terms(seq, tune, n_points)
+    if ramp:
+        d = np.roll(o1_true, 1) - o1_true
+        tau_s = np.asarray(tau_us, dtype=float) * 1e-6
+    else:
+        d = np.zeros(n_pro)
+        tau_s = np.zeros(n_points)
+    e = o1_true - o1
+    logger.debug(" - Golden Grid head: %s spokes, mean |receiver error| %.1f Hz", n, np.abs(e[:n]).mean())
+    return PhaseRows(d, tau_s, e, np.asarray(times_us, dtype=float) * 1e-6)
 
 
 def phase_correction_rows(recon_info: Dict[str, Any], options: Options,
                           n_points: int) -> Optional[PhaseRows]:
     """``phase_correction_factor`` as ``PhaseRows``, or None when no correction applies."""
     from . import timing as timing_mod
+    from .traj import grid_head_length
 
+    if grid_head_length(recon_info):
+        # Golden Grid head (WI-0113 run 5): its receiver error applies also without the ramp model
+        return _grid_head_rows(recon_info, n_points, bool(getattr(options, "correct_ramptime", True)))
     if not getattr(options, "correct_ramptime", True):
         return None
     o1 = np.asarray(recon_info.get("O1List_Hz") or [], dtype=float)
@@ -282,7 +333,8 @@ def recon_dataobj(fid_fobj,
                   virtual_traj=None,
                   k0_out=None,
                   chunk_spokes=None,
-                  k0_method=None):
+                  k0_method=None,
+                  weights=None):
     """Reconstruct image volumes from FID data and write to an output file.
 
     Each frame is reconstructed in contiguous spoke chunks (WI-0097, D-0133):
@@ -318,6 +370,10 @@ def recon_dataobj(fid_fobj,
             sample solve when it halves the estimate, WI-0099, D-0143); ``"toeplitz"`` or
             ``"samples"`` uses that one (the hook passes the planner's choice, which also
             knows the memory limit, D-0147; tests and measurements).
+        weights (Optional[dcf.SampleWeights]): density weights of one repetition's
+            samples (and of the virtual samples with ``virtual_traj``) instead of
+            |k|^2 / max; the hook passes ``dcf.pipe_weights`` for golden trajectories
+            (WI-0113 run 5, D-0197 decision 2). Also the K0 solve uses them.
 
     Returns:
         np.dtype: Dtype of the reconstructed output volumes.
@@ -397,17 +453,26 @@ def recon_dataobj(fid_fobj,
                     choice["toeplitz_total_nbytes"] / memguard.GIB, choice["ratio"],
                     memguard.K0_SAMPLES_MAX_FRACTION)
     dmax = 0.0
-    for lo, hi in ranges:
-        tr = rows(lo, hi)[:, ignore_samples:]
-        d = serial.density(tr)
-        dmax = max(dmax, float(d.max()))
+    if weights is None:
+        for lo, hi in ranges:
+            tr = rows(lo, hi)[:, ignore_samples:]
+            d = serial.density(tr)
+            dmax = max(dmax, float(d.max()))
+            if kernel is not None:
+                kernel.add(tr, d)                  # raw |k|^2; scaled by 1 / dmax below
+            del tr, d
+        if virtual_traj is not None:
+            dmax = max(dmax, float(serial.density(virtual_traj).max()))
+            kernel.finish(1.0 / dmax)
+            w_virtual = serial.density(virtual_traj) / dmax
+    else:
+        # given weights (golden trajectories, WI-0113 run 5): already scaled, no maximum pass
         if kernel is not None:
-            kernel.add(tr, d)                  # raw |k|^2; scaled by 1 / dmax below
-        del tr, d
-    if virtual_traj is not None:
-        dmax = max(dmax, float(serial.density(virtual_traj).max()))
-        kernel.finish(1.0 / dmax)
-        w_virtual = serial.density(virtual_traj) / dmax
+            for lo, hi in ranges:
+                kernel.add(rows(lo, hi)[:, ignore_samples:], weights.chunk(lo, hi))
+        if virtual_traj is not None:
+            kernel.finish(1.0)
+            w_virtual = weights.virtual()
     nf = serial.norm_factor(volume_shape)
 
     dtype = None
@@ -441,7 +506,8 @@ def recon_dataobj(fid_fobj,
                                                   over_sampling=over_sampling)
             if not reuse or adj.n_points == 0:
                 tr = rows(lo, hi)[:, ignore_samples:]
-                w = serial.density(tr) / dmax      # kept for every frame when reuse
+                # kept for every frame when reuse
+                w = serial.density(tr) / dmax if weights is None else weights.chunk(lo, hi)
                 adj.setpts(tr)
                 del tr
             for ch in range(n_receivers):

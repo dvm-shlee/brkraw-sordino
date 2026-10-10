@@ -180,7 +180,24 @@ def calc_radial_grad3d(
     logger.debug(f' - Half sphere only: {half_sphere}')
     logger.debug(f' - Use origin: {use_origin}')
     logger.debug(f' - Reorder Gradient: {reorder}')
+    return _radial_grad3d(matrix_size, usamp, half_sphere, use_origin, reorder, npro_target)
 
+
+def radial_grad3d_undersampling(matrix_size: int, under_sampling: float, half_sphere: bool,
+                                use_origin: bool, reorder: bool) -> np.ndarray:
+    """``radialGrad3D`` of the sequence with the method's ``ProUnderSampling`` itself (WI-0113).
+
+    ``calc_radial_grad3d`` finds an undersampling that gives ``NPro`` spokes; the
+    sequence's reco relation calls ``radialGrad3D(matrix, ProUnderSampling, ...)``
+    directly, which is what Golden Grid scans of ``sordino_260801`` carry at the head
+    of their lists (``golden.grid_head``). Same loop, reordering and mirroring.
+    """
+    return _radial_grad3d(int(matrix_size), np.sqrt(float(under_sampling)), bool(half_sphere),
+                          bool(use_origin), bool(reorder), None)
+
+
+def _radial_grad3d(matrix_size, usamp, half_sphere, use_origin, reorder, npro_target) -> np.ndarray:
+    """The ``radialGrad3D`` loop for the square-root undersampling ``usamp``."""
     grad = {"r": [], "p": [], "s": []}
     radial_n_phi: list[int] = []
 
@@ -199,7 +216,7 @@ def calc_radial_grad3d(
 
     grad_array = np.stack([grad["r"], grad["p"], grad["s"]], axis=0)
     n_pro_created = grad_array.shape[-1] * (1 if half_sphere else 2) + (1 if use_origin else 0)
-    if not usamp:
+    if not usamp and npro_target is not None:
         if n_pro_created != npro_target:
             raise ValueError("Target number of projections can't be reached.")
     grad_array = reorder_projections(n_theta, radial_n_phi, grad_array, reorder)
@@ -421,6 +438,47 @@ def gradient_list(recon_info: Dict[str, Any]) -> tuple:
     return grad, grad_params
 
 
+def grid_head_length(recon_info: Dict[str, Any]) -> int:
+    """Spokes at the head of every repetition played along the Default list (0: none).
+
+    Set by ``hook._parse_recon_info`` (``golden.grid_head``) as
+    ``recon_info["GoldenGridHead"]`` for Golden Grid scans; absent elsewhere.
+    """
+    head = recon_info.get("GoldenGridHead")
+    if not head or not head.get("applied"):
+        return 0
+    return int(head["n"])
+
+
+def grid_head_list(recon_info: Dict[str, Any]) -> np.ndarray:
+    """The Default list the sequence's reco relation writes over a Golden Grid list (WI-0113)."""
+    return radial_grad3d_undersampling(int(recon_info["Matrix"][0]), float(recon_info["UnderSampling"]),
+                                       bool(recon_info["HalfAcquisition"]), bool(recon_info["UseOrigin"]),
+                                       bool(recon_info["Reorder"]))
+
+
+def _with_grid_head(recon_info: Dict[str, Any], grad: np.ndarray, params: Dict[str, Any]) -> tuple:
+    n = grid_head_length(recon_info)
+    if n == 0:
+        return grad, params
+    grad = np.array(grad, dtype=float, copy=True)
+    grad[:, :n] = grid_head_list(recon_info)[:, :n]
+    return grad, dict(params, grid_head=n)
+
+
+def spoke_directions(recon_info: Dict[str, Any]) -> tuple:
+    """(3, NPro) directions the spokes were played along, and their cache-key fields.
+
+    ``gradient_list`` (the list the method parameters describe), except for the
+    Golden Grid head of ``sordino_260801`` scans (``golden.grid_head``): there the
+    first N entries are the Default list (WI-0113 run 5, D-0197 decision 1). Used
+    for the trajectory and the K0 leading points; the ``ACQ_O1_list`` check and the
+    receiver frequencies keep the method's list.
+    """
+    grad, params = gradient_list(recon_info)
+    return _with_grid_head(recon_info, grad, params)
+
+
 #: Relative residual above which the ACQ_O1_list order check warns (WI-0113).
 #: The scanner list agrees with the computed one to ~1e-15 (WI-0112: 1.8e-15 to
 #: 3.7e-15 on four scans); another order gives ~1.
@@ -488,7 +546,8 @@ def _trajectory_inputs(recon_info: Dict[str, Any], options: Options) -> Dict[str
     n_samples = int(sample_size / 2 * over_sampling)
 
     grad, grad_params = gradient_list(recon_info)
-    check_o1_order(recon_info, grad)
+    check_o1_order(recon_info, grad)              # the recorded list follows the method's list
+    grad, grad_params = _with_grid_head(recon_info, grad, grad_params)
     out: Dict[str, Any] = {"grad": grad, "grad_params": grad_params, "n_samples": n_samples,
                            "sample_size": sample_size, "npro": npro,
                            "over_sampling": over_sampling}
@@ -573,6 +632,10 @@ __all__ = [
     'trajectory_rows',
     'TrajectoryRows',
     'gradient_list',
+    'spoke_directions',
+    'grid_head_length',
+    'grid_head_list',
+    'radial_grad3d_undersampling',
     'o1_order_residual',
     'check_o1_order',
 ]

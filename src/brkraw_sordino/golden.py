@@ -24,11 +24,14 @@ WI-0112). The arrays are (3, n) in the scanner's (R, P, S) gradient axes, like
 """
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 #: Values of ``TrajectoryMode`` this package reconstructs.
 MODES = ("Default", "GoldenSampling", "GoldenGridSampling")
@@ -322,8 +325,101 @@ def golden_unit(recon_info: Mapping[str, Any]) -> Optional[int]:
     return params["n_cell"] * (2 if params["mirror"] else 1)
 
 
+# ---------------------------------------------------------------- Golden Grid head (WI-0113 run 5)
+#: Sequence versions whose Golden Grid scans carry the Default head (RecoRelations.c of
+#: sordino_260801: ``radialGrad3D`` fills GradR/P/S whenever GoldenSampTraj is No). Used only
+#: when the scan has no ``traj`` file to show which list the reconstruction relation wrote.
+GRID_HEAD_METHODS = ("sordino_260801",)
+#: Largest difference between ``traj``-file directions and a list that still counts as equal
+#: (measured on scans 17 and 21: 1.6e-15 against the Default list, 1.9e-15 against the golden one).
+GRID_HEAD_TOL = 1e-9
+
+
+def default_head_count(matrix: int, under_sampling: float, half_sphere: bool, use_origin: bool) -> int:
+    """Number of entries ``radialGrad3D(matrix, ProUnderSampling, ...)`` writes (radial.c)."""
+    from .traj import calc_npro
+
+    n = calc_npro(int(matrix), float(under_sampling))          # one hemisphere, the C loop
+    return n * (1 if half_sphere else 2) + (1 if use_origin else 0)
+
+
+def method_name(value: Any) -> Optional[str]:
+    """``<User:sordino_260801>`` -> ``sordino_260801``; None when missing."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text.startswith("<") and text.endswith(">"):
+        text = text[1:-1].strip()
+    if ":" in text:
+        text = text.split(":", 1)[1].strip()
+    return text or None
+
+
+def grid_head(recon_info: Mapping[str, Any], *, method: Any = None, golden_samp_traj: Optional[bool] = None,
+              traj_dirs: Optional[np.ndarray] = None) -> Optional[Dict[str, Any]]:
+    """Whether a Golden Grid scan was played with the Default list at its head (D-0197 decision 1).
+
+    The sequence ``sordino_260801`` fills the gradient lists in its reconstruction
+    relation with ``radialGrad3D(matrix, ProUnderSampling, ...)`` whenever
+    ``GoldenSampTraj`` is No, which is the case for Golden Grid; the first N entries
+    (``default_head_count``) then hold the Default list. The scanner's ``traj`` file
+    is written from the same lists, so its first lines (``traj_dirs``, (3, m)) tell
+    which list it was: the Default one turns the rule on, the golden one (a fixed
+    sequence) off; with no ``traj`` file only the known version ``GRID_HEAD_METHODS``
+    gets the rule. That the scanner played these directions is inferred from the
+    data (WI-0113 run 4), not documented ParaVision behaviour.
+
+    Returns None for other modes, else a dict with ``applied``, ``n`` (0 when not
+    applied), ``source`` (``"traj file"``, ``"sequence version"`` or ``"GoldenSampTraj"``),
+    ``method`` and, with a ``traj`` file, ``traj_match`` and the two differences.
+    Warns once when the rule is applied.
+    """
+    if trajectory_mode(recon_info) != "GoldenGridSampling":
+        return None
+    name = method_name(method)
+    out: Dict[str, Any] = {"applied": False, "n": 0, "source": None, "method": name}
+    if golden_samp_traj:
+        out["source"] = "GoldenSampTraj"
+        return out
+    npro = int(recon_info["NPro"])
+    n = min(default_head_count(int(recon_info["Matrix"][0]), float(recon_info["UnderSampling"]),
+                               bool(recon_info["HalfAcquisition"]), bool(recon_info["UseOrigin"])), npro)
+    if traj_dirs is not None:
+        from .traj import grid_head_list
+        from .trajfile import head_match
+
+        dirs = np.asarray(traj_dirs, dtype=float)
+        m = min(int(dirs.shape[1]), n)
+        golden_list, _ = golden_gradients(recon_info)
+        match, d_default, d_golden = head_match(dirs[:, :m], grid_head_list(recon_info)[:, :m],
+                                                golden_list[:, :m], GRID_HEAD_TOL)
+        out.update(source="traj file", traj_match=match, traj_lines=m,
+                   traj_vs_default=d_default, traj_vs_golden=d_golden)
+        applied = match == "default"
+        if match == "neither":
+            logger.warning(
+                "sordino: Golden Grid scan: the first %s lines of the traj file match neither the Default nor the "
+                "golden list (largest differences %.3g and %.3g); the golden list is used for every spoke.",
+                m, d_default, d_golden)
+    else:
+        out["source"] = "sequence version"
+        applied = name in GRID_HEAD_METHODS
+    if applied:
+        out.update(applied=True, n=n)
+        logger.warning(
+            "sordino: Golden Grid scan of %s: the first %s spokes of every repetition are reconstructed along the "
+            "Default list (ProUnderSampling %s) with their receiver-frequency difference.\n"
+            "  The sequence's reconstruction relation wrote that list over the golden one (%s); the data fit "
+            "these directions (WI-0113).",
+            name or "an unnamed sequence", n, recon_info["UnderSampling"],
+            "the traj file shows it" if out["source"] == "traj file"
+            else "known for this version; no traj file to check")
+    return out
+
+
 __all__ = [
     "MODES", "GOLDEN_MODES", "golden_samples", "reorder_golden_samples", "unplaced_spokes",
     "SreagGrid", "sreag_grid", "sreag_cells", "sreag_trajectory", "trajectory_mode",
     "golden_parameters", "golden_gradients", "golden_unit",
+    "GRID_HEAD_METHODS", "GRID_HEAD_TOL", "default_head_count", "method_name", "grid_head",
 ]
