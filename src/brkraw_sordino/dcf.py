@@ -16,6 +16,15 @@ of all samples is a sum, so it is accumulated chunk by chunk on one grid; then e
 chunk is interpolated from it and its weights updated. No whole trajectory is built
 (D-0133); one weight per sample of one repetition is held (``memguard.dcf_nbytes``).
 
+Cap (WI-0113 run 5, measured): Pipe also *raises* the weight of samples in sparsely covered
+k-space, which amplifies their noise. On scan 17 the 12,732 head spokes (Default list) got 14.7
+times the per-spoke weight of the golden spokes and the image became noisy (NRMSE to scan 13
+0.234, |k|^2 0.244); on scan 11 the image got worse (0.157 against 0.115). So each sample's
+weight is capped at its |k|^2 / max weight, the weight of uniform radial sampling at that
+radius, and the sum is restored: Pipe only lowers the weight where curved spokes bunch (the
+streaks), it never extrapolates into thin coverage. Measured: 17 0.126, 11 0.108 (Dice 0.937,
+0.932; ``r5_cap.json``).
+
 Scale: the weights are multiplied so that their sum over the measured samples equals
 the sum of |k|^2 / max over the same samples (max also over the virtual samples with
 ``estimate_k0``, as the product normalises), so the image keeps the brightness of the
@@ -42,7 +51,8 @@ PIPE_ITER = 10
 PIPE_UPSAMPFAC = 2.0
 #: The rule as it enters the recon cache key of golden scans (hook._build_cache_params).
 RULE: Dict[str, Any] = {"method": "pipe-menon", "iterations": PIPE_ITER, "upsampfac": PIPE_UPSAMPFAC,
-                        "scale": "sum of |k|^2/max", "virtual_samples": "included with estimate_k0"}
+                        "scale": "sum of |k|^2/max", "virtual_samples": "included with estimate_k0",
+                        "cap": "min(Pipe, |k|^2/max), then the same sum"}
 
 
 def uses_sample_weights(recon_info: Dict[str, Any]) -> bool:
@@ -123,6 +133,14 @@ def pipe_weights(rows: Any, n_pro: int, ignore_samples: int, shape: Sequence[int
         k2_max = max(k2_max, float(d.max()))
     if n_v:
         k2_max = max(k2_max, float(serial.density(virtual_traj).max()))
+    w *= (k2_sum / k2_max) / float(w[:, n_v:].sum())
+    # cap: never above the |k|^2 / max weight of the same sample, then the same sum again (see CAP)
+    for lo, hi in ranges:
+        d = serial.density(rows(lo, hi)[:, ign:]).reshape(hi - lo, n_s) / k2_max
+        np.minimum(w[lo:hi, n_v:], d, out=w[lo:hi, n_v:])
+    if n_v:
+        dv = serial.density(virtual_traj).reshape(n_pro, n_v) / k2_max
+        np.minimum(w[:, :n_v], dv, out=w[:, :n_v])
     w *= (k2_sum / k2_max) / float(w[:, n_v:].sum())
     logger.info("Golden trajectory: sample-based density weights (Pipe-Menon, %s iterations) for %s samples "
                 "in %.1f s.", n_iter, n_pro * (n_v + n_s), time.perf_counter() - t0)
