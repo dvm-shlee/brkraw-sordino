@@ -144,3 +144,60 @@ O1List_Hz:
     - file: acqp
       key: ACQ_O1_list
   transform: convert_to_list
+
+# --- trajectory mode (golden.py, WI-0113) -------------------------------
+# Read from the method; missing keys give None (older sequences: Default).
+
+TrajectoryMode:
+  sources:
+    - file: method
+      key: TrajectoryMode
+  transform: strip_bruker_string
+
+NGoldenSubsets:
+  sources:
+    - file: method
+      key: NGoldenSubsets
+  transform: first_int
+
+NGoldenSpokesPerSubset:
+  sources:
+    - file: method
+      key: NGoldenSpokesPerSubset
+  transform: first_int
+
+NGoldenSteps:
+  sources:
+    - file: method
+      key: NGoldenSteps
+  transform: first_int
+
+GoldenReorder:
+  sources:
+    - file: method
+      key: GoldenReorder
+  transform: yes_no
+
+ZStackAngleDeg:
+  sources:
+    - file: method
+      key: ZStackAngleDeg
+  transform: first_float
+
+NGridRing:
+  sources:
+    - file: method
+      key: NGridRing
+  transform: first_int
+
+NGridFrames:
+  sources:
+    - file: method
+      key: NGridFrames
+  transform: first_int
+
+GridMirror:
+  sources:
+    - file: method
+      key: GridMirror
+  transform: yes_no

@@ -116,6 +116,13 @@ def to_bool(value: Any) -> bool:
     return bool(value)
 
 
+def yes_no(value: Any) -> Optional[bool]:
+    """A ParaVision Yes/No value as a bool; a missing value stays None (WI-0113)."""
+    if value is None:
+        return None
+    return to_bool(first(value) if not isinstance(value, str) else value)
+
+
 def ms_to_s(value: Any) -> Optional[float]:
     val = first_float(value)
     if val is None:

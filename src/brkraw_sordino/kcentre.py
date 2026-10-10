@@ -40,7 +40,7 @@ import numpy as np
 from . import timing as timing_mod
 from .ramp import ramp_integral
 from .recon import make_nufft_operator, nufft_adjoint
-from .traj import calc_radial_grad3d
+from .traj import gradient_list
 
 #: Conjugate-gradient iterations of the least-squares image.
 N_ITER: int = 10
@@ -130,9 +130,7 @@ def leading_points(recon_info: Dict[str, Any], ignore_samples: int = 1,
     win = timing_mod.ramp_window(seq, tune)
     fs = list(ts) if win is None else [ramp_integral(t, win[0], win[1]) for t in ts]
     if grad is None:
-        grad = calc_radial_grad3d(int(recon_info["Matrix"][0]), int(recon_info["NPro"]),
-                                  bool(recon_info["HalfAcquisition"]), bool(recon_info["UseOrigin"]),
-                                  bool(recon_info["Reorder"]))
+        grad, _ = gradient_list(recon_info)     # the scan's TrajectoryMode (WI-0113)
     g_prev = np.roll(grad, 1, axis=1).T
     delta = grad.T - g_prev
     unit = 1.0 / (n - 1) / 2.0

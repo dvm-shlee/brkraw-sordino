@@ -283,7 +283,10 @@ def reorder_projections(
 #: calc_npro, radial_angles, radial_angle, reorder_projections,
 #: calc_radial_traj3d or calc_radial_traj3d_integral, so that trajectories saved
 #: by older code are not reused. tests/test_traj_cache_key.py holds a golden
-#: value that fails when the formulas change.
+#: value that fails when the formulas change. The golden lists (golden.py,
+#: WI-0113) are new: their fields carry ``mode`` and never equal a Default
+#: field set, so the version did not change and Default files keep their names;
+#: increase it when a golden generator changes its result.
 TRAJ_CACHE_VERSION = 2
 
 
@@ -389,29 +392,103 @@ class TrajectoryRows:
         return self._samp[None, :, None] * self._gT[lo:hi, None, :]
 
 
+def gradient_list(recon_info: Dict[str, Any]) -> tuple:
+    """(3, NPro) spoke directions of the scan's ``TrajectoryMode`` and their cache-key fields.
+
+    ``Default`` (also a method without ``TrajectoryMode``): ``calc_radial_grad3d``
+    with the same fields as before WI-0113, so its trajectory files keep their
+    names. ``GoldenSampling`` / ``GoldenGridSampling``: ``golden.golden_gradients``;
+    the fields carry ``mode`` and the generating method values, so a golden list
+    never shares a file with a Default one. Only the direction list depends on
+    the mode; the ramp model and the phase correction are the same for all.
+    """
+    from . import golden
+
+    mode = golden.trajectory_mode(recon_info)
+    if mode != "Default":
+        grad, params = golden.golden_gradients(recon_info)
+        params = {k: v for k, v in params.items() if k != "n_cell"}
+        return grad, params
+    sample_size = int(recon_info['Matrix'][0])
+    npro = int(recon_info['NPro'])
+    half_acquisition = bool(recon_info['HalfAcquisition'])
+    use_origin = bool(recon_info['UseOrigin'])
+    reorder = bool(recon_info['Reorder'])
+    grad = calc_radial_grad3d(sample_size, npro, half_acquisition, use_origin, reorder)
+    grad_params = {"matrix_size": sample_size, "npro_target": npro,
+                   "half_sphere": half_acquisition, "use_origin": use_origin,
+                   "reorder": reorder}
+    return grad, grad_params
+
+
+#: Relative residual above which the ACQ_O1_list order check warns (WI-0113).
+#: The scanner list agrees with the computed one to ~1e-15 (WI-0112: 1.8e-15 to
+#: 3.7e-15 on four scans); another order gives ~1.
+O1_ORDER_TOL = 1e-6
+
+
+def o1_order_residual(o1: np.ndarray, grad: np.ndarray) -> float:
+    """Relative RMS residual of ``o1 ~ c + offR*gR + offP*gP + offS*gS`` (least squares).
+
+    The sequence records ``ACQ_O1_list[i] = offR*GradR[i] + offP*GradP[i] +
+    offS*GradS[i]`` (FOV offset times the spoke direction), so the computed list in
+    the acquired order leaves only rounding. The three offsets are fitted, so the
+    check confirms the order and the relative directions, not a fixed change of
+    axes or signs (WI-0112).
+    """
+    o1 = np.asarray(o1, dtype=float).ravel()
+    g = np.asarray(grad, dtype=float)
+    a = np.concatenate([np.ones((g.shape[1], 1)), g.T], axis=1)
+    coef, *_ = np.linalg.lstsq(a, o1, rcond=None)
+    res = o1 - a @ coef
+    spread = float(np.sqrt(np.mean((o1 - o1.mean()) ** 2)))
+    if spread == 0.0:
+        return float("nan")
+    return float(np.sqrt(np.mean(res ** 2)) / spread)
+
+
+def check_o1_order(recon_info: Dict[str, Any], grad: np.ndarray) -> Optional[float]:
+    """Compare the computed spoke order with the scanner's ``ACQ_O1_list`` (WI-0113).
+
+    Only possible when the list has one value per spoke and the FOV centre is
+    off the isocentre (otherwise the list is one value, or constant). Logged at
+    debug level; a golden mode whose residual is above ``O1_ORDER_TOL`` gives one
+    warning, since its image would be wrong. For ``Default`` the residual is only
+    logged (its list is the established one). Returns the residual or None.
+    """
+    from . import golden
+
+    o1 = np.asarray(recon_info.get("O1List_Hz") or [], dtype=float)
+    mode = golden.trajectory_mode(recon_info)
+    if o1.size != grad.shape[1] or o1.size < 4 or float(np.ptp(o1)) == 0.0:
+        logger.debug(" + ACQ_O1_list order check not possible (%s values for %s spokes, no FOV offset)",
+                     o1.size, grad.shape[1])
+        return None
+    res = o1_order_residual(o1, grad)
+    logger.debug(" + ACQ_O1_list order check (%s): relative residual %.3g", mode, res)
+    if mode != "Default" and not res <= O1_ORDER_TOL:
+        logger.warning(
+            "sordino: the computed %s spoke order does not match the scanner's ACQ_O1_list\n"
+            "  residual  %.3g (expected below %.0e)\n"
+            "  the image is likely wrong; check TrajectoryMode and its method parameters",
+            mode, res, O1_ORDER_TOL)
+    return res
+
+
 def _trajectory_inputs(recon_info: Dict[str, Any], options: Options) -> Dict[str, Any]:
     """Gradient list, cache-key fields and per-sample terms of the chosen formula."""
     correct_ramptime = bool(getattr(options, "correct_ramptime", True))
 
     sample_size = int(recon_info['Matrix'][0])
     npro = int(recon_info['NPro'])
-    half_acquisition = bool(recon_info['HalfAcquisition'])
-    use_origin = bool(recon_info['UseOrigin'])
-    reorder = bool(recon_info['Reorder'])
 
     eff_bandwidth = recon_info['EffBandwidth_Hz']
     over_sampling = recon_info['OverSampling']
     traj_offset = recon_info['AcqDelayTotal_us']
     n_samples = int(sample_size / 2 * over_sampling)
 
-    grad = calc_radial_grad3d(sample_size,
-                              npro,
-                              half_acquisition,
-                              use_origin,
-                              reorder)
-    grad_params = {"matrix_size": sample_size, "npro_target": npro,
-                   "half_sphere": half_acquisition, "use_origin": use_origin,
-                   "reorder": reorder}
+    grad, grad_params = gradient_list(recon_info)
+    check_o1_order(recon_info, grad)
     out: Dict[str, Any] = {"grad": grad, "grad_params": grad_params, "n_samples": n_samples,
                            "sample_size": sample_size, "npro": npro,
                            "over_sampling": over_sampling}
@@ -495,4 +572,7 @@ __all__ = [
     'get_trajectory',
     'trajectory_rows',
     'TrajectoryRows',
+    'gradient_list',
+    'o1_order_residual',
+    'check_o1_order',
 ]
