@@ -36,9 +36,13 @@ def test_the_excluded_options_are_exactly_the_four():
 
 
 def test_every_other_option_is_in_the_key(tmp_path):
+    # the frame options of golden scans (WI-0113 CP3) are keyed through the resolved frame
+    # plan ("frames" entry, tests/test_golden_frames.py), so keys without frames are unchanged
+    from brkraw_sordino.frames import FRAME_KEYS
+
     keyed = set(_params(tmp_path)["options"])
     names = {f.name for f in fields(Options)}
-    assert keyed == names - set(hook.RECON_KEY_EXCLUDED)
+    assert keyed == names - set(hook.RECON_KEY_EXCLUDED) - set(FRAME_KEYS)
 
 
 @pytest.mark.parametrize("kw", [

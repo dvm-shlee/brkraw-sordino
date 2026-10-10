@@ -1,7 +1,9 @@
 """A golden scan through the hook, one repetition per frame (WI-0113 CP2).
 
-With no frame option a golden scan is reconstructed as before: one repetition
-(all NPro spokes) per frame (D-0186, decision 1 = A). The hook must use the
+With ``frame_spokes="repetition"`` a golden scan is reconstructed as a Default
+scan is: one repetition (all NPro spokes) per frame. (CP2 had this as the
+default, D-0186; since D-0190 the default is the method subset, see
+test_golden_frames.py.) The hook must use the
 golden list for the trajectory, the ramp model and the phase rows; the result
 equals the whole-array reference (``recon.nufft_adjoint`` after the phase
 factor) on the golden trajectory, and differs from a reconstruction that uses
@@ -57,6 +59,7 @@ class _Scan:
 def _hook_image(tmp_path, monkeypatch, info, fid, **kw):
     monkeypatch.setattr(hook, "_parse_recon_info", lambda scan: dict(info))
     monkeypatch.setattr(hook, "_get_fid_entry", lambda scan: _Entry(fid))
+    kw.setdefault("frame_spokes", "repetition")
     real, imag = hook.get_dataobj(_Scan(), None, cache_dir=str(tmp_path), as_complex=True, **kw)
     return real + 1j * imag
 
@@ -93,7 +96,7 @@ def test_another_spoke_order_gives_another_image_and_a_warning(tmp_path, monkeyp
     assert any("ACQ_O1_list" in r.getMessage() for r in caplog.records)
 
 
-def test_default_frame_is_one_repetition(tmp_path, monkeypatch):
+def test_repetition_option_gives_one_repetition_per_frame(tmp_path, monkeypatch):
     info = _golden_info(2)
     options = _build_options({"cache_dir": str(tmp_path / "t")})
     traj = get_trajectory(info, options)
@@ -101,5 +104,5 @@ def test_default_frame_is_one_repetition(tmp_path, monkeypatch):
     fid = b"".join(_fid_frames(info, traj, 2, 1, factor))
     monkeypatch.setattr(hook, "_parse_recon_info", lambda scan: dict(info))
     monkeypatch.setattr(hook, "_get_fid_entry", lambda scan: _Entry(fid))
-    got = hook.get_dataobj_info(_Scan(), None, cache_dir=str(tmp_path / "h"))
+    got = hook.get_dataobj_info(_Scan(), None, cache_dir=str(tmp_path / "h"), frame_spokes="repetition")
     assert got["frames"] == 2 and got["shape"][-1] == 2
