@@ -82,6 +82,15 @@ def test_axes_and_signs_match_the_scanner_traj_file(scans, scan, first):
     assert worst <= TOL
 
 
+def test_golden_grid_head_is_found_from_the_traj_file(scans):
+    """WI-0113 run 5 (D-0197 decision 1): scan 17's traj file holds the Default list at its head."""
+    h = scans[17]["GoldenGridHead"]
+    assert h["applied"] is True and h["n"] == 12732 and h["source"] == "traj file"
+    assert h["method"] == "sordino_260801" and h["traj_vs_default"] <= 1e-12
+    for s in (11, 13, 18):
+        assert "GoldenGridHead" not in scans[s]
+
+
 @pytest.mark.parametrize("scan", [13, 18])
 def test_default_scans_keep_the_default_list(scans, scan):
     from brkraw_sordino.traj import calc_radial_grad3d, gradient_list

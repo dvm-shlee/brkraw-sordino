@@ -243,7 +243,9 @@ def test_an_all_true_spoke_mask_changes_nothing(tmp_path):
     fid = b"".join(fids)
     a = _run_frames(fr, fid, rows, info, opts, plan, factor)
     b = _run_frames(fr, fid, rows, info, opts, plan, factor, spoke_mask=np.ones(2 * info["NPro"], bool))
-    assert np.array_equal(a, b)
+    # finufft's multithreaded spreading is not bit-reproducible between two runs, so "the same"
+    # is held to rounding (two identical calls differ by about 1e-16 relative)
+    assert _rel(b, a) < 1e-12
 
 
 def test_masked_spokes_add_nothing(tmp_path):
@@ -259,7 +261,8 @@ def test_masked_spokes_add_nothing(tmp_path):
         zeroed.append(vol.tobytes(order="F"))
     a = _run_frames(fr, b"".join(fids), rows, info, opts, plan, factor, spoke_mask=mask)
     b = _run_frames(fr, b"".join(zeroed), rows, info, opts, plan, factor)
-    assert np.array_equal(a, b)
+    assert _rel(a, b) < 1e-12
+    assert _rel(a, _run_frames(fr, b"".join(fids), rows, info, opts, plan, factor)) > 1e-3
 
 
 def test_spoke_mask_is_checked(tmp_path):

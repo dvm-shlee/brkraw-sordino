@@ -264,7 +264,7 @@ def _direct(tmp_path, info, fid, pieces, scale):
     return img * (d_sub / d_all) * scale
 
 
-def _engine(tmp_path, info, fid, k0_out=None, **kw):
+def _engine(tmp_path, info, fid, k0_out=None, pipe=False, **kw):
     f = _frames()
     options = _opts(tmp_path / "e", **kw)
     plan = f.make_plan(info, options)
@@ -272,10 +272,15 @@ def _engine(tmp_path, info, fid, k0_out=None, **kw):
     if options.estimate_k0:
         from brkraw_sordino import kcentre
         vt = kcentre.leading_points(info, options.ignore_samples or 1)
+    weights = None
+    if pipe:      # the hook's weights for golden scans since WI-0113 run 5 (D-0197 decision 2)
+        from brkraw_sordino import dcf
+        weights = dcf.pipe_weights(trajectory_rows(info, options), info["NPro"], 1, SHAPE, info["NPro"],
+                                   virtual_traj=vt)
     out = io.BytesIO()
     f.recon_frames(io.BytesIO(fid), trajectory_rows(info, options), info, out, options, plan,
                    phase_factor=phase_correction_rows(info, options, N_POINTS), virtual_traj=vt,
-                   k0_out=k0_out)
+                   k0_out=k0_out, weights=weights)
     per = int(np.prod(SHAPE))
     data = np.frombuffer(out.getvalue(), dtype=np.complex128)
     assert data.size == per * plan.n_frames
@@ -422,7 +427,7 @@ def test_hook_returns_the_frames_and_records_them(tmp_path, monkeypatch):
     scan = _Scan()
     re, im = hook.get_dataobj(scan, None, as_complex=True, **kw)
     assert re.shape[-1] == 18
-    _, imgs = _engine(tmp_path, info, fid, frame_spokes=120, frame_step=40)
+    _, imgs = _engine(tmp_path, info, fid, pipe=True, frame_spokes=120, frame_step=40)
     from brkraw_sordino.orientation import correct as correct_orientation
     assert _rel(re[..., 3] + 1j * im[..., 3], correct_orientation(imgs[3], info)) < 1e-12
     meta = scan._sordino_recon_meta["frames"]
