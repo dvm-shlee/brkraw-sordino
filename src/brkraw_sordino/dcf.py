@@ -88,8 +88,11 @@ def _plan(nufft_type: int, shape: Sequence[int]):
 
 
 def pipe_weights(rows: Any, n_pro: int, ignore_samples: int, shape: Sequence[int], chunk_spokes: int,
-                 virtual_traj: Optional[np.ndarray] = None, n_iter: int = PIPE_ITER) -> SampleWeights:
+                 virtual_traj: Optional[np.ndarray] = None, n_iter: int = PIPE_ITER,
+                 cap: bool = True) -> SampleWeights:
     """Pipe-Menon weights of one repetition's samples, chunk by chunk (see the module text).
+
+    ``cap=False`` returns the uncapped estimate (diagnostics and figures; the hook always caps).
 
     ``rows(lo, hi)`` (``traj.TrajectoryRows.rows`` or an array's slice) gives the untrimmed
     rows; the first ``ignore_samples`` samples of each spoke are left out, as in the
@@ -134,14 +137,15 @@ def pipe_weights(rows: Any, n_pro: int, ignore_samples: int, shape: Sequence[int
     if n_v:
         k2_max = max(k2_max, float(serial.density(virtual_traj).max()))
     w *= (k2_sum / k2_max) / float(w[:, n_v:].sum())
-    # cap: never above the |k|^2 / max weight of the same sample, then the same sum again (see CAP)
-    for lo, hi in ranges:
-        d = serial.density(rows(lo, hi)[:, ign:]).reshape(hi - lo, n_s) / k2_max
-        np.minimum(w[lo:hi, n_v:], d, out=w[lo:hi, n_v:])
-    if n_v:
-        dv = serial.density(virtual_traj).reshape(n_pro, n_v) / k2_max
-        np.minimum(w[:, :n_v], dv, out=w[:, :n_v])
-    w *= (k2_sum / k2_max) / float(w[:, n_v:].sum())
+    # cap: never above the |k|^2 / max weight of the same sample, then the same sum again (module text)
+    if cap:
+        for lo, hi in ranges:
+            d = serial.density(rows(lo, hi)[:, ign:]).reshape(hi - lo, n_s) / k2_max
+            np.minimum(w[lo:hi, n_v:], d, out=w[lo:hi, n_v:])
+        if n_v:
+            dv = serial.density(virtual_traj).reshape(n_pro, n_v) / k2_max
+            np.minimum(w[:, :n_v], dv, out=w[:, :n_v])
+        w *= (k2_sum / k2_max) / float(w[:, n_v:].sum())
     logger.info("Golden trajectory: sample-based density weights (Pipe-Menon, %s iterations) for %s samples "
                 "in %.1f s.", n_iter, n_pro * (n_v + n_s), time.perf_counter() - t0)
     return SampleWeights(w[:, n_v:], w[:, :n_v] if n_v else None)
