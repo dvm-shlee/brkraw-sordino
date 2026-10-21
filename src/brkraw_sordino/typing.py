@@ -31,6 +31,9 @@ class Options:
     # WI-0132 (D-0230): reconstruction matrix at the same FOV (lowres.py), read/phase/slice of
     # PVM_Matrix; None = the acquisition matrix. Keyed only when set (hook._build_cache_params).
     recon_matrix: Optional[Tuple[int, int, int]] = None
+    # Peri-event frames (perievent.py): one image per time bin relative to a repeating event,
+    # each bin a union of one range per event. Keyed through the frame plan, not as a raw option.
+    peri_event: Optional[Union[str, dict]] = None
 
 
 __all__ = [

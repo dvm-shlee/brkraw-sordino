@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 from .typing import Options
 from .boolopt import parse_bool
 from . import frames as frames_mod
-from . import dcf, golden, kcentre, lowres
+from . import dcf, golden, kcentre, lowres, perievent
 from .traj import get_trajectory, trajectory_rows  # noqa: F401  (get_trajectory: tests patch it)
 from .recon import (
     GRID_RULE,
@@ -180,6 +180,7 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         frame_accumulate=parse_bool("frame_accumulate", kwargs.get("frame_accumulate", False)),
         golden_weights=golden_weights,
         recon_matrix=lowres.parse(kwargs.get("recon_matrix")),
+        peri_event=perievent.parse_peri_event(kwargs.get("peri_event")),
     )
 
 

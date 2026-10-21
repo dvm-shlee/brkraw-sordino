@@ -43,12 +43,12 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
-from . import frameplan, golden
+from . import frameplan, golden, perievent
 
 logger = logging.getLogger(__name__)
 
 #: Options of this module; they enter the recon cache key through ``FramePlan.key``.
-FRAME_KEYS = ("frame_spokes", "frame_step", "frame_accumulate")
+FRAME_KEYS = ("frame_spokes", "frame_step", "frame_accumulate") + perievent.PERI_KEYS
 
 #: Measured in WI-0112 (scan 11, 3,200-spoke windows): largest gap between spoke
 #: directions from a subset start, from the middle of a subset, across a repetition end.
@@ -114,7 +114,8 @@ def parse_frame_step(value: Any) -> Optional[int]:
 def _explicit(options) -> bool:
     fs = getattr(options, "frame_spokes", None)
     return (fs not in (None, "repetition") or getattr(options, "frame_step", None) is not None
-            or bool(getattr(options, "frame_accumulate", False)))
+            or bool(getattr(options, "frame_accumulate", False))
+            or getattr(options, "peri_event", None) not in (None, False, ""))
 
 
 def is_frame_mode(options, recon_info: Dict[str, Any]) -> bool:
@@ -141,15 +142,29 @@ class FramePlan:
     crossing: int
     misaligned: int
     tr_ms: Optional[float]
+    #: Peri-event plans only (perievent.py): ``groups[i]`` is the output bin of
+    #: ``ranges[i]``, so one bin is the union of several ranges and ``scales`` is
+    #: per bin, not per range. None for the ordinary one-range-per-frame plans.
+    groups: Optional[Tuple[int, ...]] = None
+    peri: Optional[Dict[str, Any]] = None
 
     @property
     def n_frames(self) -> int:
-        return len(self.ranges)
+        # scales is per output image in both plans (per range, or per peri-event bin)
+        return len(self.scales)
 
     @property
     def frame_interval_s(self) -> Optional[float]:
-        """Time between frames: ``frame_step`` x the spoke TR (D-0190 2); None without a TR."""
-        return None if self.tr_ms is None else self.step * self.tr_ms * 1e-3
+        """Time between frames: ``frame_step`` x the spoke TR (D-0190 2); None without a TR.
+
+        Peri-event bins are consecutive windows on the clock of the event, not of
+        the scan, so what separates two output images is the bin width; the step
+        (the event period) is the distance between the ranges inside one bin.
+        """
+        if self.tr_ms is None:
+            return None
+        spokes = self.window if self.groups is not None else self.step
+        return spokes * self.tr_ms * 1e-3
 
     @property
     def max_open(self) -> int:
@@ -170,12 +185,17 @@ class FramePlan:
 
     def key(self) -> Dict[str, Any]:
         """What decides the frame images (recon cache key)."""
-        return {"unit": self.unit, "window": self.window, "step": self.step, "accumulate": self.accumulate}
+        key = {"unit": self.unit, "window": self.window, "step": self.step, "accumulate": self.accumulate}
+        if self.groups is not None:
+            # the ranges themselves decide a peri-event image, so two different event
+            # layouts must not share a cache entry
+            key["peri"] = {"ranges": [[lo, hi] for lo, hi in self.ranges], "groups": list(self.groups)}
+        return key
 
     def describe(self) -> Dict[str, Any]:
         """Result metadata (``scan._sordino_recon_meta["frames"]``)."""
         tr = self.tr_ms
-        return {
+        meta = {
             "trajectory_mode": self.trajectory_mode, "unit_spokes": self.unit,
             "frame_spokes": self.window, "frame_step": self.step, "accumulate": self.accumulate,
             "n_frames": self.n_frames, "repetitions": self.n_rep, "spokes_per_repetition": self.npro,
@@ -185,6 +205,14 @@ class FramePlan:
             "frame_centre_s": None if tr is None else [(lo + hi) / 2 * tr * 1e-3 for lo, hi in self.ranges],
             "k0_scope": None,
         }
+        if self.groups is not None:
+            # a peri-event frame is a bin relative to the event, not a point on the scan clock
+            meta["groups"] = list(self.groups)
+            meta["peri_event"] = dict(self.peri or {})
+            meta["frame_centre_s"] = None if tr is None else [
+                (self.peri or {}).get("start_spokes", 0) * tr * 1e-3 + (b + 0.5) * self.window * tr * 1e-3
+                for b in range(self.n_frames)]
+        return meta
 
 
 def make_plan(recon_info: Dict[str, Any], options) -> Optional[FramePlan]:
@@ -207,6 +235,25 @@ def make_plan(recon_info: Dict[str, Any], options) -> Optional[FramePlan]:
     npro = int(recon_info["NPro"])
     n_rep = int(get_num_frames(recon_info, options))
     total = n_rep * npro
+    tr = recon_info.get("RepetitionTime_ms")
+    tr_ms = float(tr) if tr not in (None, 0, 0.0) else None
+    if getattr(options, "peri_event", None) not in (None, False, ""):
+        # one image per time bin relative to a repeating event; a bin is the union of one
+        # range per event, so the plan carries groups and the engine sums per bin
+        if mode == "Default":
+            logger.warning(
+                "sordino: TrajectoryMode Default lists its spokes in sphere order, so a peri-event bin "
+                "covers only part of the sphere; peri_event is meant for golden trajectories.")
+        ranges, groups, scales, info = perievent.build(recon_info, options, n_rep)
+        misaligned = frameplan.misaligned_count(ranges, unit) if unit > 1 else 0
+        if misaligned:
+            logger.warning(
+                "sordino: %s of %s peri-event range(s) start or end inside a method subset (%s spokes); "
+                "such a range covers the sphere less evenly. Bin and period that are multiples of %s "
+                "spokes keep whole subsets.", misaligned, len(ranges), unit, unit)
+        return FramePlan(mode, unit, npro, n_rep, info["bin_spokes"], info["period_spokes"], False,
+                         ranges, scales, frameplan.crossing_count(ranges, npro), misaligned, tr_ms,
+                         groups=groups, peri=info)
     fs = options.frame_spokes
     if fs == "repetition" or (fs is None and mode == "Default"):
         window = npro                                     # Default list: one repetition unless a count is given
@@ -235,8 +282,6 @@ def make_plan(recon_info: Dict[str, Any], options) -> Optional[FramePlan]:
     scales = tuple(frameplan.frame_scales(ranges, npro))
     crossing = frameplan.crossing_count(ranges, npro)
     misaligned = frameplan.misaligned_count(ranges, unit) if unit > 1 else 0
-    tr = recon_info.get("RepetitionTime_ms")
-    tr_ms = float(tr) if tr not in (None, 0, 0.0) else None
     if misaligned:
         logger.warning(
             "sordino: %s of %s frames start or end inside a method subset (%s spokes). Any spoke range can "
@@ -443,6 +488,29 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
             k0_out.append(k0)
         logger.info("estimate_k0 with frames: one estimate from all %s spokes read, used by every frame.",
                     plan.n_rep * npro)
+
+    if plan.groups is not None:
+        # Peri-event: a bin is the union of one range per event, which no difference of two
+        # prefix sums can express, so each bin gets its own accumulator. The ranges are sorted
+        # by start (perievent.build), so the stream still runs forward and grids each spoke once.
+        n_out = plan.n_frames
+        logger.info("peri_event: %s bin accumulator(s) of %s complex128 (%.2f GiB) over %s range(s).",
+                    n_out, "x".join(str(v) for v in shape), n_out * int(np.prod(shape)) * 16 / 2**30,
+                    len(plan.ranges))
+        accs = [np.zeros(shape, dtype=np.complex128) for _ in range(n_out)]
+        for (lo, hi), bin_index in zip(plan.ranges, plan.groups):
+            add_range(accs[bin_index], lo, hi, preds)
+        for bin_index in range(n_out):
+            img = accs[bin_index] * (plan.scales[bin_index] / nf)
+            if out_scale != 1.0:
+                img *= out_scale
+            out = img if n_rx > 1 else img[0]
+            img_fobj.write(np.ascontiguousarray(out.T).tobytes())
+            accs[bin_index] = None
+            del img, out
+        logger.debug("peri_event: %s bin(s) written from %s range(s) of %s spokes.",
+                     n_out, len(plan.ranges), plan.window)
+        return np.dtype(np.complex128)
 
     starts_last: Dict[int, int] = {}
     for idx, (lo, _) in enumerate(plan.ranges):
