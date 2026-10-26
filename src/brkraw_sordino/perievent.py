@@ -43,9 +43,15 @@ from typing import Any, Dict, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 #: Option names owned by this module (excluded from the raw option cache key).
-PERI_KEYS = ("peri_event",)
+PERI_KEYS = ("peri_event", "peri_censor")
 
 _FIELDS = {"period", "bin", "onset", "start", "bins", "events"}
+
+#: ``peri_censor``: path to a 1D file of 0/1 over the spokes of the stream,
+#: 1 = usable. Any peri-event range whose spokes are not all usable is left out
+#: of its bin; the per-bin scale already divides by the events that reached it,
+#: so dropping ranges changes the averaging weight and nothing else.
+CENSOR_KEY = "peri_censor"
 
 
 def parse_peri_event(value: Any) -> Optional[Dict[str, float]]:
@@ -114,6 +120,34 @@ def _spokes(seconds: float, tr_ms: float, name: str, *, signed: bool = False) ->
     return n
 
 
+def _load_censor(value, total: int):
+    """A 0/1 mask over the spokes of the stream, or None when unset.
+
+    The file is a 1D column of 0/1 per *frame* of the reconstruction it
+    was measured on; it is stretched to spokes here. A range is used only when
+    every spoke in it is marked usable, so a censored frame removes the whole
+    peri-event bin it falls in rather than half of one.
+    """
+    if value in (None, False, ""):
+        return None
+    import numpy as np
+
+    col = np.loadtxt(str(value))
+    col = np.asarray(col).reshape(-1)
+    if col.size == 0:
+        raise ValueError(f"sordino: peri_censor file {value} is empty")
+    if not np.isin(col, (0, 1)).all():
+        raise ValueError(f"sordino: peri_censor file {value} must hold only 0 and 1")
+    if total % col.size:
+        raise ValueError(f"sordino: peri_censor has {col.size} rows, which does not divide the "
+                         f"{total} spokes of the stream")
+    per = total // col.size
+    keep = np.repeat(col.astype(bool), per)
+    logger.info("sordino: peri_censor %s rows x %s spokes; %s of %s spokes usable (%.1f%%).",
+                col.size, per, int(keep.sum()), total, 100.0 * keep.mean())
+    return keep
+
+
 def build(recon_info: Dict[str, Any], options, n_rep: int) -> Tuple[
         Tuple[Tuple[int, int], ...], Tuple[int, ...], Tuple[float, ...], Dict[str, Any]]:
     """``(ranges, groups, scales, info)`` for the peri-event plan.
@@ -152,8 +186,10 @@ def build(recon_info: Dict[str, Any], options, n_rep: int) -> Tuple[
         raise ValueError(f"sordino: peri_event places no event inside the {total} spokes read "
                          f"(onset {onset}, period {period}).")
 
+    keep = _load_censor(getattr(options, "peri_censor", None), total)
+
     ranges, groups = [], []
-    used, dropped = [0] * n_bins, 0
+    used, dropped, censored = [0] * n_bins, 0, 0
     for k in range(max_events):
         base = onset + period * k + start
         for b in range(n_bins):
@@ -161,6 +197,9 @@ def build(recon_info: Dict[str, Any], options, n_rep: int) -> Tuple[
             hi = lo + width
             if lo < 0 or hi > total:
                 dropped += 1
+                continue
+            if keep is not None and not keep[lo:hi].all():
+                censored += 1
                 continue
             ranges.append((lo, hi))
             groups.append(b)
@@ -184,6 +223,7 @@ def build(recon_info: Dict[str, Any], options, n_rep: int) -> Tuple[
         "period_spokes": period, "bin_spokes": width, "onset_spokes": onset, "start_spokes": start,
         "n_bins": n_bins, "n_events": n_events, "events_per_bin": used, "dropped_bins": dropped,
         "trajectory_phases": phases, "unique_spokes_per_bin": unique,
+        "censored_ranges": censored,
         "bin_edges_s": [(start + width * b) * tr_ms * 1e-3 for b in range(n_bins + 1)],
     }
     logger.info("sordino: peri_event %s bin(s) of %s spokes (%.3fs) from %s event(s) every %s spokes "
@@ -192,6 +232,10 @@ def build(recon_info: Dict[str, Any], options, n_rep: int) -> Tuple[
                 n_events * width, phases, unique)
     if dropped:
         logger.info("sordino: %s peri-event bin(s) fell outside the spokes read and were left out.", dropped)
+    if censored:
+        logger.info("sordino: peri_censor left out %s of %s range(s) (%.1f%%); bins now hold %s-%s event(s) "
+                    "and each bin's scale divides by its own count.", censored, censored + len(ranges),
+                    100.0 * censored / (censored + len(ranges)), min(used), max(used))
     if unique < n_events * width:
         logger.warning(
             "sordino: the event period (%s spokes) and the repetition (%s spokes) share a factor, so the "
@@ -203,4 +247,4 @@ def build(recon_info: Dict[str, Any], options, n_rep: int) -> Tuple[
     return ranges, groups, scales, info
 
 
-__all__ = ["PERI_KEYS", "parse_peri_event", "build"]
+__all__ = ["PERI_KEYS", "CENSOR_KEY", "parse_peri_event", "build"]

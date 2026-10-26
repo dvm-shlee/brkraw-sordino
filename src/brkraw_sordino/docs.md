@@ -26,6 +26,8 @@ frame options (golden scans; a Default scan only with a spoke count):
   frame_step=null            spokes between frame starts (null: frame_spokes)
   frame_accumulate=false     every frame starts at the first spoke
   peri_event=null            bins relative to a repeating event: period=,bin=
+  peri_censor=null           1D 0/1 over spokes; drops censored ranges
+  subtract_rep_mean=false    remove each spoke position's repetition average
 
 read-time options (not in the cache key):
   frames=null                frames to return: int, list or "start:stop:step"
