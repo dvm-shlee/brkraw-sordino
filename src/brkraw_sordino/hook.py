@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 from .typing import Options
 from .boolopt import parse_bool
 from . import frames as frames_mod
-from . import dcf, golden, kcentre, lowres
+from . import dcf, golden, kcentre, lowres, motioncorr, perievent
 from .traj import get_trajectory, trajectory_rows  # noqa: F401  (get_trajectory: tests patch it)
 from .recon import (
     GRID_RULE,
@@ -143,6 +143,9 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         "estimate_k0",
         "golden_weights",
         "recon_matrix",
+        "subtract_rep_mean",
+        "motion_file",
+        "motion_spokes",
     } | set(READ_KEYS) | set(frames_mod.FRAME_KEYS)
     unknown_keys = sorted(set(kwargs.keys()) - known_keys)
     if unknown_keys:
@@ -180,6 +183,11 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         frame_accumulate=parse_bool("frame_accumulate", kwargs.get("frame_accumulate", False)),
         golden_weights=golden_weights,
         recon_matrix=lowres.parse(kwargs.get("recon_matrix")),
+        peri_event=perievent.parse_peri_event(kwargs.get("peri_event")),
+        peri_censor=kwargs.get("peri_censor") or None,
+        subtract_rep_mean=parse_bool("subtract_rep_mean", kwargs.get("subtract_rep_mean", False)),
+        motion_file=kwargs.get("motion_file") or None,
+        motion_spokes=int(kwargs["motion_spokes"]) if kwargs.get("motion_spokes") else None,
     )
 
 
@@ -377,6 +385,19 @@ def _get_fid_identity(fid_entry: FileIO) -> str:
 RECON_KEY_EXCLUDED = ("as_complex", "split_ch", "clear_cache", "cache_dir")
 
 
+def _affine_for_motion(scan: Any, recon_info: Dict[str, Any], options: Options) -> "np.ndarray":
+    """Voxel -> RAS affine of the reconstructed grid, for the motion frame conversion.
+
+    The motion parameters come from ``3dvolreg`` run on a reconstruction of this
+    same scan, so its grid is the one the rotations and displacements have to be
+    expressed in. ``get_affine`` builds exactly that.
+    """
+    aff = get_affine(scan, reco_id=None, **{})
+    if isinstance(aff, tuple):
+        aff = aff[0]
+    return np.asarray(aff, dtype=float)
+
+
 def _build_cache_params(
     scan: Any,
     reco_id: Optional[int],
@@ -389,7 +410,8 @@ def _build_cache_params(
     # without frames (one repetition per frame) is the key from before CP3
     keyed = {k: v for k, v in asdict(options).items()
              if k not in RECON_KEY_EXCLUDED and k not in frames_mod.FRAME_KEYS
-             and k not in ("golden_weights", "recon_matrix")}
+             and k not in ("golden_weights", "recon_matrix", "subtract_rep_mean",
+                           "motion_file", "motion_spokes")}
     params = {
         "scan_id": getattr(scan, "scan_id", None),
         "reco_id": reco_id,
@@ -403,6 +425,13 @@ def _build_cache_params(
     }
     if frame_plan is not None:
         params["frames"] = frame_plan.key()
+        if getattr(options, "motion_file", None):
+            # corrected images differ from uncorrected ones
+            params["motion"] = {"file": str(options.motion_file),
+                                "spokes": int(options.motion_spokes or 0)}
+        if getattr(options, "subtract_rep_mean", False):
+            # the images differ, so they must not share a cache entry with a plain run
+            params["subtract_rep_mean"] = True
     if dcf.is_golden(recon_info):
         # golden trajectories: the density-weight rule of the golden_weights choice (WI-0113 runs 5
         # and 6; the default "capped" is the run-5 key); Default keys unchanged
@@ -1035,11 +1064,31 @@ def get_dataobj(
                             out_scale=out_scale,
                         )
                 elif frame_plan is not None:
+                    m_rot = m_disp = None
+                    if options.motion_file:
+                        import numpy as _np
+                        _p = _np.loadtxt(str(options.motion_file))
+                        if _p.ndim != 2 or _p.shape[1] != 6:
+                            raise ValueError(f"sordino: motion_file must have 6 columns "
+                                             f"(3dvolreg -1Dfile), got {_p.shape}")
+                        _npro = int(recon_info["NPro"])
+                        _tot = frame_plan.n_rep * _npro
+                        _sps = int(options.motion_spokes or (_tot // len(_p)))
+                        if _sps * len(_p) < _tot:
+                            raise ValueError(f"sordino: motion_file has {len(_p)} rows x "
+                                             f"{_sps} spokes = {_sps * len(_p)}, short of the "
+                                             f"{_tot} spokes read")
+                        logger.info("motion correction: %s; %s spokes per row",
+                                    motioncorr.summarise(_p), _sps)
+                        m_rot, m_disp = motioncorr.per_spoke(
+                            _p, _affine_for_motion(scan, recon_info, options), _sps, _tot)
                     dtype = frames_mod.recon_frames(
                         fid_fobj, traj, recon_info, img_fobj, options, frame_plan,
                         phase_factor=phase_factor, virtual_traj=virtual_traj, k0_out=k0_frames,
                         chunk_spokes=chunk_spokes, k0_method=info.get("recon_k0_method"),
-                        weights=weights, out_scale=out_scale)
+                        weights=weights, out_scale=out_scale,
+                        subtract_rep_mean=options.subtract_rep_mean,
+                        motion_rot=m_rot, motion_disp=m_disp)
                 else:
                     logger.debug("Spoketiming correction disabled.")
                     dtype = recon_dataobj(fid_fobj, traj, recon_info, img_fobj, options,

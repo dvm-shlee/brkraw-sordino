@@ -25,13 +25,16 @@ frame options (golden scans; a Default scan only with a spoke count):
   frame_spokes=null          spokes per frame: subset, repetition or count
   frame_step=null            spokes between frame starts (null: frame_spokes)
   frame_accumulate=false     every frame starts at the first spoke
+  peri_event=null            bins relative to a repeating event: period=,bin=
+  peri_censor=null           1D 0/1 over spokes; drops censored ranges
+  subtract_rep_mean=false    remove each spoke position's repetition average
+  motion_file=null           3dvolreg -1Dfile: correct spokes in k-space
+  motion_spokes=null         spokes per motion row (null: from length)
 
 read-time options (not in the cache key):
   frames=null                frames to return: int, list or "start:stop:step"
   axis=null                  frame axis: 3, -1, cycle or repetition
   max_memory_gb=auto         size-check limit (auto: half of physical memory)
   allow_short_fid=true       short FID: reconstruct the complete frames only
-
 ZTE-mode scans of sordino_260801: set correct_ramptime=false yourself.
-Details, cautions, caches and sizes: docs/technical-note.md, Appendix A,
-in the brkraw-sordino repository.
+Details, cautions, caches and sizes: docs/technical-note.md, Appendix A.
