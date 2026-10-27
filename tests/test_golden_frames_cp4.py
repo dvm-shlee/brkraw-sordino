@@ -9,7 +9,7 @@
   spoke TR in the requested time unit; one repetition per frame keeps
   the header as before.
 * The golden spoke lists do not use ``ProUnderSampling``, ``Reorder`` or
-  ``HalfAcquisition`` (Director 2026-10-10): values left in a golden protocol
+  ``HalfAcquisition``: values left in a golden protocol
   change nothing.
 """
 import io
