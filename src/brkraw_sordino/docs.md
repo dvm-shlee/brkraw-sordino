@@ -32,6 +32,9 @@ frame options (golden scans; a Default scan only with a spoke count):
   anat_solver=adjoint        frame_spokes=all image: adjoint or cg (all spokes)
   anat_cg_iter=10            CG iterations of anat_solver=cg
   anat_lambda=0.0            Tikhonov weight of anat_solver=cg (absolute)
+  frame_static=adjoint       rep_pattern=model frames: static part adjoint or cg
+  frame_static_iter=10       CG iterations of frame_static=cg
+  frame_static_lambda=0.0    Tikhonov weight of frame_static=cg (absolute)
 
 read-time options (not in the cache key):
   frames=null                frames to return: int, list or "start:stop:step"

@@ -51,6 +51,12 @@ class Options:
     anat_solver: str = "adjoint"
     anat_cg_iter: int = 10
     anat_lambda: float = 0.0
+    # Static part of rep_pattern="model" frames (frames.py): "adjoint" (the adjoint all-spoke image of
+    # x_hat) or "cg" (x_hat itself, with its CG iterations and Tikhonov weight). Keyed only when not
+    # "adjoint" (hook._build_cache_params).
+    frame_static: str = "adjoint"
+    frame_static_iter: int = 10
+    frame_static_lambda: float = 0.0
 
 
 __all__ = [

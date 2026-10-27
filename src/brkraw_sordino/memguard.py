@@ -260,7 +260,7 @@ def recon_nbytes(n_pro, n_points, n_receivers, volume_shape, *, estimate_k0=Fals
 
 
 def frames_nbytes(max_open, n_receivers, volume_shape, *, estimate_k0=False, n_pro=0,
-                  n_virtual=0, rep_pattern=False, anat_cg=False) -> int:
+                  n_virtual=0, rep_pattern=False, anat_cg=False, static_cg=False) -> int:
     """Image memory of the golden frame engine (``frames.recon_frames``, WI-0113 CP4).
 
     The running sum, ``max_open`` copies of it at frame starts, and the frame being
@@ -270,7 +270,8 @@ def frames_nbytes(max_open, n_receivers, volume_shape, *, estimate_k0=False, n_p
     per channel: the all-spoke image (or its solution x_hat), the all-spoke image kept as the
     output offset, and the pattern volume of the frame being written. With ``anat_cg``
     (``anat_solver='cg'``) five more per channel: the CG work volumes x, r, p, A p and the
-    right-hand side.
+    right-hand side. With ``static_cg`` (``frame_static='cg'``) the same five (the x_hat solve), the
+    all-spoke image being replaced by x_hat itself.
     """
     image = int(n_receivers) * int(math.prod(int(v) for v in volume_shape)) * 16
     total = (int(max_open) + 2) * image
@@ -278,7 +279,7 @@ def frames_nbytes(max_open, n_receivers, volume_shape, *, estimate_k0=False, n_p
         total += image + int(n_receivers) * int(n_pro) * int(n_virtual) * 16
     if rep_pattern:
         total += 3 * image
-    if anat_cg:
+    if anat_cg or static_cg:
         total += 5 * image
     return int(total)
 

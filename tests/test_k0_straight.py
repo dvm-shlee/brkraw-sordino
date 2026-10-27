@@ -295,4 +295,5 @@ def test_options_fields_are_unchanged(tmp_path, monkeypatch):
         "offreso_freqs", "mem_limit", "clear_cache", "split_ch", "cache_dir", "as_complex", "estimate_k0",
         "frame_spokes", "frame_step", "frame_accumulate", "golden_weights", "recon_matrix",
         "peri_event", "peri_censor", "subtract_rep_mean", "rep_pattern",
-        "anat_solver", "anat_cg_iter", "anat_lambda"])
+        "anat_solver", "anat_cg_iter", "anat_lambda",
+        "frame_static", "frame_static_iter", "frame_static_lambda"])

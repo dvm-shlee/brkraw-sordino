@@ -47,7 +47,8 @@ def test_every_other_option_is_in_the_key(tmp_path):
     # subtract_rep_mean likewise: a plain run keeps the key it had before the option existed
     assert keyed == names - set(hook.RECON_KEY_EXCLUDED) - set(FRAME_KEYS) - {
         "golden_weights", "recon_matrix", "subtract_rep_mean", "rep_pattern",
-        "anat_solver", "anat_cg_iter", "anat_lambda"}
+        "anat_solver", "anat_cg_iter", "anat_lambda",
+        "frame_static", "frame_static_iter", "frame_static_lambda"}
     assert "recon_matrix" not in _params(tmp_path)
     assert _params(tmp_path, recon_matrix=4)["recon_matrix"]["matrix"] == [4, 4, 4]
     assert "subtract_rep_mean" not in _params(tmp_path)

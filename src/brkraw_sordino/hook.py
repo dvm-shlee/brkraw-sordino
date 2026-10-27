@@ -148,6 +148,9 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         "anat_solver",
         "anat_cg_iter",
         "anat_lambda",
+        "frame_static",
+        "frame_static_iter",
+        "frame_static_lambda",
     } | set(READ_KEYS) | set(frames_mod.FRAME_KEYS)
     unknown_keys = sorted(set(kwargs.keys()) - known_keys)
     if unknown_keys:
@@ -192,6 +195,9 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         anat_solver=frames_mod.parse_anat_solver(kwargs.get("anat_solver")),
         anat_cg_iter=frames_mod.parse_anat_cg_iter(kwargs.get("anat_cg_iter")),
         anat_lambda=frames_mod.parse_anat_lambda(kwargs.get("anat_lambda")),
+        frame_static=frames_mod.parse_frame_static(kwargs.get("frame_static")),
+        frame_static_iter=frames_mod.parse_frame_static_iter(kwargs.get("frame_static_iter")),
+        frame_static_lambda=frames_mod.parse_frame_static_lambda(kwargs.get("frame_static_lambda")),
     )
 
 
@@ -402,7 +408,8 @@ def _build_cache_params(
     keyed = {k: v for k, v in asdict(options).items()
              if k not in RECON_KEY_EXCLUDED and k not in frames_mod.FRAME_KEYS
              and k not in ("golden_weights", "recon_matrix", "subtract_rep_mean", "rep_pattern",
-                          "anat_solver", "anat_cg_iter", "anat_lambda")}
+                          "anat_solver", "anat_cg_iter", "anat_lambda",
+                          "frame_static", "frame_static_iter", "frame_static_lambda")}
     params = {
         "scan_id": getattr(scan, "scan_id", None),
         "reco_id": reco_id,
@@ -422,6 +429,9 @@ def _build_cache_params(
         if getattr(options, "rep_pattern", "none") != "none":
             # the images differ; the solve behind them is part of the key
             params["rep_pattern"] = frames_mod.rep_pattern_key(options, recon_info)
+    if getattr(options, "frame_static", "adjoint") != "adjoint":
+        # a different static image in every frame; the default key is unchanged
+        params["frame_static"] = frames_mod.frame_static_key(options)
     if getattr(options, "anat_solver", "adjoint") != "adjoint":
         # a different image (the solve and its iterations); the default key is unchanged
         params["anat"] = frames_mod.anat_key(options)
@@ -732,7 +742,8 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
                 frame_plan.max_open, n_ch, vol, estimate_k0=bool(options.estimate_k0),
                 n_pro=int(recon_info["NPro"]), n_virtual=n_virtual,
                 rep_pattern=getattr(options, "rep_pattern", "none") != "none",
-                anat_cg=getattr(options, "anat_solver", "adjoint") == "cg")
+                anat_cg=getattr(options, "anat_solver", "adjoint") == "cg",
+                static_cg=getattr(options, "frame_static", "adjoint") == "cg")
         recon_share += dcf_share
     info: Dict[str, Any] = {
         "shape": shape,
@@ -939,6 +950,9 @@ def get_dataobj(
         recon_meta["frames"]["k0_scope"] = "all spokes read"
     recon_meta["anat"] = None if options.anat_solver == "adjoint" else {
         "solver": options.anat_solver, "n_iter": options.anat_cg_iter, "lambda": options.anat_lambda}
+    recon_meta["frame_static"] = None if options.frame_static == "adjoint" else {
+        "static": options.frame_static, "n_iter": options.frame_static_iter,
+        "lambda": options.frame_static_lambda}
     setattr(scan, "_sordino_recon_meta", recon_meta)
     setattr(scan, "_sordino_dataobj_info", info)
     memguard.check(info)
@@ -952,6 +966,9 @@ def get_dataobj(
         recon_meta["k0"] = plan["img_meta"].get("k0")
     if cached_dtype is not None and recon_meta["anat"] and plan["img_meta"] and plan["img_meta"].get("anat"):
         recon_meta["anat"] = plan["img_meta"]["anat"]       # with the final residual
+    if (cached_dtype is not None and recon_meta["frame_static"] and plan["img_meta"]
+            and plan["img_meta"].get("frame_static")):
+        recon_meta["frame_static"] = plan["img_meta"]["frame_static"]      # with the final residual
     if cached_dtype is not None and red is not None and plan["img_meta"] and plan["img_meta"].get("recon_matrix"):
         recon_meta["recon_matrix"] = plan["img_meta"]["recon_matrix"]     # with the cut details (WI-0132)
 
@@ -1072,7 +1089,11 @@ def get_dataobj(
                         chunk_spokes=chunk_spokes, k0_method=info.get("recon_k0_method"),
                         weights=weights, out_scale=out_scale,
                         subtract_rep_mean=options.subtract_rep_mean, anat_out=anat_out)
-                    if anat_out:
+                    if anat_out and recon_meta["frame_static"]:
+                        recon_meta["frame_static"] = dict(
+                            recon_meta["frame_static"], iterations_run=anat_out["iterations_run"],
+                            relative_residual=anat_out["relative_residual"])
+                    elif anat_out:
                         recon_meta["anat"] = dict(recon_meta["anat"], **anat_out)
                 else:
                     logger.debug("Spoketiming correction disabled.")
@@ -1098,6 +1119,7 @@ def get_dataobj(
                 "short_fid": recon_meta["short_fid"],
                 **({"recon_matrix": recon_meta["recon_matrix"]} if recon_meta.get("recon_matrix") else {}),
                 **({"anat": recon_meta["anat"]} if recon_meta.get("anat") else {}),
+                **({"frame_static": recon_meta["frame_static"]} if recon_meta.get("frame_static") else {}),
             },
         )
     else:
