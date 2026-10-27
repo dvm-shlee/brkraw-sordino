@@ -470,13 +470,13 @@ def _anat_image(options, kernel, xs, full, preds, virtual_traj, w_virtual, adj, 
 
     Solves (N + lambda' I) x = A^H W d on the normal operator N of all spokes read (the measured samples
     and, with ``estimate_k0``, the predicted centre samples of every repetition) by CG from zero, with
-    lambda' = lambda * n_rep * nf (lambda relative to the operator gain, which is about n_rep * nf).
+    lambda' = lambda, the absolute Tikhonov weight (its useful scale depends on the data gain).
     ``xs``: one slot per channel, overwritten by the solution. Fills ``anat_out`` with solver, iterations, lambda and the
     final relative residual (worst channel).
     """
     from . import serial
 
-    lam = float(options.anat_lambda) * plan.n_rep * nf
+    lam = float(options.anat_lambda)
     n_it = int(options.anat_cg_iter)
     n_rx = len(xs)
     hist = []

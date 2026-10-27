@@ -577,8 +577,8 @@ one the frames use, solved first from the measured samples; the predicted sample
 $d$). The normal operator is the Toeplitz convolution (or the sample-based operator, as `estimate_k0`
 picks it) summed over the repetitions, so one CG iteration costs two FFTs per axis pair, not a NUFFT of
 every spoke. The solve starts from zero and runs `anat_cg_iter` iterations of the same CG as
-the centre solve; $\lambda' = \lambda\, n_{\mathrm{rep}}\, n_f$, so `anat_lambda` is relative to the gain of
-the normal operator and 0 is the plain weighted least squares.
+the centre solve; lambda is the absolute Tikhonov weight (no gain scaling; its useful scale
+depends on the data gain) and 0 is the plain weighted least squares.
 
 **Why it sharpens.** The adjoint with density weights is only the first CG step: it treats the weighted
 samples as if the trajectory were a perfect tiling, so the undersampling of the sphere and the overlap of
@@ -730,7 +730,7 @@ directions come from the method parameter `TrajectoryMode` (`Default`, `GoldenSa
 | `rep_pattern` | `none` | `none`, `model` or `measured`. Removes the repetition-locked undersampling pattern from every complex frame before the magnitude. `model` subtracts the pattern of a forward model of the frame's own spokes (any number of repetitions); `measured` writes the `subtract_rep_mean` residual plus the all-spoke image (at least 2 repetitions, not with `peri_censor`). Needs a frame plan, refused together with `subtract_rep_mean` (each a `ValueError`). Keyed only when not `none`. Section 10.2 (`frames.py:261-271`, `frames.py:584-668`). |
 | `anat_solver` | `adjoint` | `adjoint` or `cg`. `cg` reconstructs the image of `frame_spokes: all` by conjugate gradients on the normal equations of all spokes instead of the adjoint (section 10.3). Needs `frame_spokes: all`; refused with `peri_event`, `frame_step`, `frame_accumulate`, `rep_pattern`, `subtract_rep_mean`. Keyed only when not `adjoint`. |
 | `anat_cg_iter` | `10` | CG iterations of `anat_solver: cg` (a positive integer; refused with the adjoint). |
-| `anat_lambda` | `0.0` | Tikhonov weight of `anat_solver: cg`, at least 0, relative to the operator gain $n_{\mathrm{rep}}\,n_f$ (0.1 is a mild shrinkage). Refused with the adjoint. |
+| `anat_lambda` | `0.0` | Tikhonov weight of `anat_solver: cg`, at least 0, absolute (its useful scale depends on the data gain). Refused with the adjoint. |
 
 Read-time options (they choose what is returned from the cache and are not part of its key):
 

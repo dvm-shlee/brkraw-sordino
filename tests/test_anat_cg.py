@@ -73,7 +73,7 @@ def test_lambda_reduces_noise_amplification(tmp_path):
         assert rec["lambda"] == lam
         return float(np.linalg.norm(b - a))
 
-    assert response(0.5) < response(0.0)
+    assert response(5.0) < response(0.0)
 
 
 def test_default_is_the_adjoint_and_the_key_is_unchanged(tmp_path):
