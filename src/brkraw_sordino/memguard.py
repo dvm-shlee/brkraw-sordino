@@ -260,18 +260,22 @@ def recon_nbytes(n_pro, n_points, n_receivers, volume_shape, *, estimate_k0=Fals
 
 
 def frames_nbytes(max_open, n_receivers, volume_shape, *, estimate_k0=False, n_pro=0,
-                  n_virtual=0) -> int:
+                  n_virtual=0, rep_pattern=False) -> int:
     """Image memory of the golden frame engine (``frames.recon_frames``, WI-0113 CP4).
 
     The running sum, ``max_open`` copies of it at frame starts, and the frame being
     written (two arrays), complex128 per channel; with ``estimate_k0`` also the
     all-spoke adjoint of the solve and the predicted centre samples of one repetition.
-    The chunk and the K0 solve are in ``recon_plan``.
+    The chunk and the K0 solve are in ``recon_plan``. With ``rep_pattern`` three more arrays
+    per channel: the all-spoke image (or its solution x_hat), the all-spoke image kept as the
+    output offset, and the pattern volume of the frame being written.
     """
     image = int(n_receivers) * int(math.prod(int(v) for v in volume_shape)) * 16
     total = (int(max_open) + 2) * image
     if estimate_k0:
         total += image + int(n_receivers) * int(n_pro) * int(n_virtual) * 16
+    if rep_pattern:
+        total += 3 * image
     return int(total)
 
 

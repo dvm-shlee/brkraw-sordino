@@ -34,6 +34,13 @@ spokes read (one least-squares solve, ``kcentre``), and its predicted leading
 samples are added spoke by spoke; every frame uses that one estimate, and the
 frames stay linear in their spokes. ``correct_spoketiming`` is refused with
 frames: it moves every spoke of a repetition to one time point.
+
+``rep_pattern`` (``model`` or ``measured``): every frame position k has the same spokes in every
+repetition, so every frame carries the same undersampling pattern. ``model`` subtracts
+P_k = (s_k / nf) T_k x_hat - x_full from the complex frame, with T_k = A_k^H W_k A_k the normal
+operator of the frame's own kept samples, x_hat a few CG steps on the all-spoke normal operator and
+x_full the all-spoke image at the frame gain; ``measured`` writes the residual of ``subtract_rep_mean``
+plus x_full. Theory: rep-pattern-removal (the technical note, section 10.2).
 """
 from __future__ import annotations
 
@@ -109,6 +116,28 @@ def parse_frame_step(value: Any) -> Optional[int]:
     if n <= 0:
         raise ValueError(msg)
     return n
+
+
+REP_PATTERNS = ("none", "model", "measured")
+
+
+def parse_rep_pattern(value: Any) -> str:
+    """``none`` (also None and False), ``model`` or ``measured`` (ValueError otherwise)."""
+    if value is None or value is False:
+        return "none"
+    text = value.strip().lower() if isinstance(value, str) else None
+    if text in REP_PATTERNS:
+        return text
+    if text in ("", "false", "off"):
+        return "none"
+    raise ValueError(f"sordino: rep_pattern must be 'none', 'model' or 'measured', got {value!r}")
+
+
+def rep_pattern_key(options, recon_info: Dict[str, Any]) -> Dict[str, Any]:
+    """Cache-key entry of ``rep_pattern`` (used only when the mode is not ``none``)."""
+    from .kcentre import k0_iterations
+
+    return {"mode": getattr(options, "rep_pattern", "none"), "xhat": "cg", "n_iter": k0_iterations(recon_info)}
 
 
 def _explicit(options) -> bool:
@@ -229,7 +258,18 @@ def make_plan(recon_info: Dict[str, Any], options) -> Optional[FramePlan]:
     if getattr(options, "peri_censor", None) and not peri_on:
         raise ValueError("sordino: peri_censor needs peri_event (a peri-event frame plan, for example "
                          "peri_event=period=20,bin=1); without it the censor file would be ignored.")
+    pattern = getattr(options, "rep_pattern", "none")
+    if pattern != "none":
+        if getattr(options, "subtract_rep_mean", False):
+            raise ValueError("sordino: rep_pattern and subtract_rep_mean cannot be used together; "
+                             "rep_pattern='measured' keeps the image that subtract_rep_mean removes.")
+        if pattern == "measured" and getattr(options, "peri_censor", None):
+            raise ValueError("sordino: rep_pattern='measured' cannot be used with peri_censor yet; use "
+                             "rep_pattern='model'.")
     if not is_frame_mode(options, recon_info):
+        if pattern != "none":
+            raise ValueError("sordino: rep_pattern needs a frame plan (peri_event or a frame option such "
+                             "as frame_spokes); without one the option would be ignored.")
         if getattr(options, "subtract_rep_mean", False):
             raise ValueError("sordino: subtract_rep_mean needs a frame plan (peri_event or a frame "
                              "option such as frame_spokes); without one the option would be ignored.")
@@ -248,6 +288,8 @@ def make_plan(recon_info: Dict[str, Any], options) -> Optional[FramePlan]:
     npro = int(recon_info["NPro"])
     n_rep = int(get_num_frames(recon_info, options))
     total = n_rep * npro
+    if pattern == "measured" and n_rep < 2:
+        raise ValueError(f"sordino: rep_pattern='measured' needs at least 2 repetitions, this run reads {n_rep}")
     tr = recon_info.get("RepetitionTime_ms")
     tr_ms = float(tr) if tr not in (None, 0, 0.0) else None
     if getattr(options, "peri_event", None) not in (None, False, ""):
@@ -387,6 +429,12 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
     from .recon import (_row_source, correct_offreso, grid_shift, grid_shift_factor, parse_fid_info,
                         parse_volume_shape)
 
+    mode = getattr(options, "rep_pattern", "none")
+    if mode != "none" and subtract_rep_mean:
+        raise ValueError("sordino: rep_pattern and subtract_rep_mean cannot be used together")
+    if mode != "none" and spoke_mask is not None:
+        raise ValueError("sordino: rep_pattern with a spoke mask is not supported yet")
+    need_x = virtual_traj is not None or mode == "model"      # a CG solve on the all-spoke normal operator
     img_fobj.seek(0)
     fid_shape, fid_dtype = parse_fid_info(recon_info)
     vol = [int(v) for v in parse_volume_shape(recon_info, options)]
@@ -415,7 +463,7 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
     n_used = n_points if n_stop is None else int(n_stop)
     if chunk_spokes is None:
         chunk_spokes = memguard.recon_plan(npro, n_points, n_rx, vol,
-                                           estimate_k0=virtual_traj is not None)["chunk_spokes"]
+                                           estimate_k0=need_x)["chunk_spokes"]
     offreso = getattr(options, "offreso_freqs", None)
     bw, osf = recon_info.get("EffBandwidth_Hz"), recon_info.get("OverSampling")
 
@@ -427,7 +475,7 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
     # density maximum over one repetition (and the virtual samples), as recon_dataobj; with
     # estimate_k0 the normal operator of the n_rep repetitions (n_rep x one repetition's kernel)
     kernel = None
-    if virtual_traj is not None:
+    if need_x:
         choice = memguard.k0_method(npro, n_points, n_rx, vol)
         method = choice["method"] if k0_method is None else str(k0_method)
         if method == "toeplitz":
@@ -448,20 +496,24 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
             del tr, d
         if virtual_traj is not None:
             dmax = max(dmax, float(serial.density(virtual_traj).max()))
+        if kernel is not None:
             kernel.finish(float(plan.n_rep) / dmax)
+        if virtual_traj is not None:
             n_virtual = int(virtual_traj.shape[1])
             w_virtual = (serial.density(virtual_traj) / dmax).reshape(npro, n_virtual)
     else:
         if kernel is not None:
             for lo, hi in serial.spoke_ranges(npro, chunk_spokes):
                 kernel.add(rows(lo, hi)[:, ign:], weights.chunk(lo, hi))
-        if virtual_traj is not None:
+        if kernel is not None:
             kernel.finish(float(plan.n_rep))
+        if virtual_traj is not None:
             w_virtual = weights.virtual().reshape(npro, int(virtual_traj.shape[1]))
     rep_mean = None
-    if subtract_rep_mean:
+    if subtract_rep_mean or mode == "measured":
+        name = "subtract_rep_mean" if subtract_rep_mean else "rep_pattern='measured'"
         if plan.n_rep < 2:
-            raise ValueError("sordino: subtract_rep_mean needs at least 2 repetitions, "
+            raise ValueError(f"sordino: {name} needs at least 2 repetitions, "
                              f"this run reads {plan.n_rep}")
         # censored spokes (peri_censor) are left out of the average so they cannot leak into the
         # residual of the spokes that are used; a position censored in every repetition gets mean 0
@@ -478,17 +530,20 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
                 rep_mean[a:b] += k
         rep_mean /= np.maximum(counts, 1).astype(np.float32)[:, None, None]
         stream.rewind()
-        logger.info("subtract_rep_mean: averaged %s repetitions of each of the %s spoke positions "
+        logger.info("%s: averaged %s repetitions of each of the %s spoke positions "
                     "(%.2f GiB, %s censored spoke(s) left out); every spoke is reconstructed as its "
-                    "deviation from that average.", plan.n_rep, npro, rep_mean.nbytes / 2**30,
+                    "deviation from that average.", name, plan.n_rep, npro, rep_mean.nbytes / 2**30,
                     0 if censor is None else int((~censor).sum()))
 
     nf = serial.norm_factor(vol)
     shift = grid_shift(recon_info)       # derived from the affine by the hook (WI-0119)
     adj = serial.Adjoint(vol)
 
-    def add_range(acc, g_lo, g_hi, preds=None):
-        """acc += raw adjoint of stream spokes g_lo .. g_hi (and their predicted centre samples)."""
+    def add_range(acc, g_lo, g_hi, preds=None, raw=False):
+        """acc += adjoint of stream spokes g_lo .. g_hi (and their predicted centre samples).
+
+        ``raw`` leaves the repetition mean out: the all-spoke passes (the K0 solve, x_hat, x_full)
+        must see the data, not their residuals, which sum to zero over the repetitions."""
         g = g_lo
         while g < g_hi:
             r = g // npro
@@ -497,7 +552,7 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
             for a, b in serial.spoke_ranges(hi - lo, chunk_spokes):
                 a, b = a + lo, b + lo
                 k = stream.read(r * npro + a, b - a)
-                if rep_mean is not None:
+                if rep_mean is not None and not raw:
                     k = k - rep_mean[a:b]          # residual from this position's own average
                 if phase_factor is not None:
                     k = k * phase_factor[a:b][:, None, :]
@@ -528,24 +583,90 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
 
     shape = (n_rx,) + tuple(vol)
     preds = None
-    if virtual_traj is not None:
+    xs = None
+    x_full = None
+    if mode != "none" or virtual_traj is not None:
         from .kcentre import k0_iterations
         n_iter = k0_iterations(recon_info)     # N_ITER unless the centre gap is wide (WI-0137)
 
+        # all-spoke image of the RAW data (add_range(raw=True)): with a repetition mean the
+        # residuals would sum to zero here and the solve below would see no object
         full = np.zeros(shape, dtype=np.complex128)
-        add_range(full, 0, plan.n_rep * npro)
+        add_range(full, 0, plan.n_rep * npro, raw=True)
         stream.rewind()
-        preds, k0 = [], []
-        for ch in range(n_rx):
-            x, _ = serial.conjugate_gradient(kernel.normal, full[ch], n_iter)
-            k0.append(complex(x.sum()))
-            preds.append(serial.forward(x, virtual_traj).reshape(npro, -1))
-            del x
-        del full, kernel
-        if k0_out is not None:
-            k0_out.append(k0)
-        logger.info("estimate_k0 with frames: one estimate from all %s spokes read, used by every frame.",
-                    plan.n_rep * npro)
+        if need_x:
+            preds, k0, xs = [], [], []
+            for ch in range(n_rx):
+                x, _ = serial.conjugate_gradient(kernel.normal, full[ch], n_iter)
+                if virtual_traj is not None:
+                    k0.append(complex(x.sum()))
+                    preds.append(serial.forward(x, virtual_traj).reshape(npro, -1))
+                xs.append(x)
+            if virtual_traj is None:
+                preds = None
+            if mode == "model":
+                # the all-spoke image of the model: the same operator that the frames use
+                full = np.stack([kernel.normal(x) for x in xs])
+                xs = np.stack(xs)
+            else:
+                xs = None
+            del kernel
+            if k0_out is not None and virtual_traj is not None:
+                k0_out.append(k0)
+            logger.info("%s: one estimate from all %s spokes read, used by every frame.",
+                        "estimate_k0 with frames" if virtual_traj is not None else "rep_pattern='model'",
+                        plan.n_rep * npro)
+        if mode != "none":
+            # x_full: the all-spoke image at the frame gain (the time mean of the frames), with the
+            # predicted centre samples of every repetition; one image per channel
+            x_full = full
+            if preds is not None:
+                for a, b in serial.spoke_ranges(npro, chunk_spokes):
+                    adj.setpts(virtual_traj[a:b])
+                    wv = w_virtual[a:b].reshape(-1)
+                    for ch in range(n_rx):
+                        adj.add(x_full[ch], plan.n_rep * preds[ch][a:b].reshape(-1) * wv)
+            x_full /= plan.n_rep * nf
+        else:
+            del full
+    # residual frames (subtract_rep_mean, measured) carry no predicted centre term: the centre samples
+    # are the same in every repetition, so their residual is zero; x_full carries them for measured
+    frame_preds = None if rep_mean is not None else preds
+
+    ranges_of = None
+    if plan.groups is not None:
+        ranges_of = [[] for _ in range(plan.n_frames)]
+        for rng_, bin_index in zip(plan.ranges, plan.groups):
+            ranges_of[bin_index].append(rng_)
+    else:
+        ranges_of = [[rng_] for rng_ in plan.ranges]
+
+    def pattern_term(index):
+        """What is added to image ``index`` before the output gain: x_full - (s / nf) T x_hat (model),
+        x_full (measured). An empty (zero-scale) frame stays zero."""
+        scale = plan.scales[index]
+        if mode == "none" or scale == 0.0:
+            return None
+        if mode == "measured":
+            return x_full
+        t = np.zeros(shape, dtype=np.complex128)
+        for lo_, hi_ in ranges_of[index]:
+            g = lo_
+            while g < hi_:
+                r = g // npro
+                lo = g - r * npro
+                hi = min(hi_ - r * npro, npro)
+                for a, b in serial.spoke_ranges(hi - lo, chunk_spokes):
+                    a, b = a + lo, b + lo
+                    tr = rows(a, b)[:, ign:]
+                    w = serial.density(tr) / dmax if weights is None else weights.chunk(a, b)
+                    t += serial.normal_on(xs, tr, w)
+                    if virtual_traj is not None:
+                        t += serial.normal_on(xs, virtual_traj[a:b], w_virtual[a:b])
+                g = r * npro + hi
+        t *= -scale / nf
+        t += x_full
+        return t
 
     if plan.groups is not None:
         # Peri-event: a bin is the union of one range per event, which no difference of two
@@ -557,9 +678,13 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
                     len(plan.ranges))
         accs = [np.zeros(shape, dtype=np.complex128) for _ in range(n_out)]
         for (lo, hi), bin_index in zip(plan.ranges, plan.groups):
-            add_range(accs[bin_index], lo, hi, preds)
+            add_range(accs[bin_index], lo, hi, frame_preds)
         for bin_index in range(n_out):
             img = accs[bin_index] * (plan.scales[bin_index] / nf)
+            term = pattern_term(bin_index)
+            if term is not None:
+                img += term
+                del term
             if out_scale != 1.0:
                 img *= out_scale
             out = img if n_rx > 1 else img[0]
@@ -586,6 +711,10 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
         while nxt < plan.n_frames and plan.ranges[nxt][1] == b:
             lo = plan.ranges[nxt][0]
             img = (run - snaps[lo]) * (plan.scales[nxt] / nf)
+            term = pattern_term(nxt)
+            if term is not None:
+                img += term
+                del term
             if out_scale != 1.0:
                 img *= out_scale
             out = img if n_rx > 1 else img[0]
@@ -598,12 +727,12 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
             snaps[b] = run.copy()
         active += opens.get(b, 0) - closes.get(b, 0)
         if i + 1 < len(points) and active > 0:
-            add_range(run, b, points[i + 1], preds)
+            add_range(run, b, points[i + 1], frame_preds)
     assert nxt == plan.n_frames
     logger.debug("frames: %s written (%s x %s spokes, step %s, accumulate %s)", plan.n_frames, plan.n_frames,
                  plan.window, plan.step, plan.accumulate)
     return np.dtype(np.complex128)
 
 
-__all__ = ["FRAME_KEYS", "FramePlan", "parse_frame_spokes", "parse_frame_step", "is_frame_mode",
-           "make_plan", "recon_frames"]
+__all__ = ["FRAME_KEYS", "REP_PATTERNS", "FramePlan", "parse_frame_spokes", "parse_frame_step",
+           "parse_rep_pattern", "rep_pattern_key", "is_frame_mode", "make_plan", "recon_frames"]

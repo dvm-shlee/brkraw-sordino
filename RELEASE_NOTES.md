@@ -10,9 +10,18 @@ on top of it). Details and equations: `docs/technical-note.md`, section 10.1.
   range is used only when all its spokes are usable.
 - `subtract_rep_mean` (`frames.py:462-483`): every spoke is reconstructed as its deviation from the mean of its
   spoke position over the repetitions read.
+- `rep_pattern` (`none`, `model`, `measured`; default `none`; `frames.py:261-271`, `frames.py:584-668`): removes the
+  repetition-locked undersampling pattern from every complex frame before the magnitude. `model` subtracts the
+  pattern of a forward model of the frame's own spokes, `measured` writes the `subtract_rep_mean` residual plus the
+  all-spoke image. Needs a frame plan; refused with `subtract_rep_mean`; `measured` needs 2 repetitions and is
+  refused with `peri_censor`. Keyed only when set. Equations: `docs/technical-note.md`, section 10.2.
 - Dependency pin `finufft<2.5` (`pyproject.toml:19`); the suite is run with finufft 2.4.1.
 
 Behaviour changes in the peri-event stage:
+
+- With `subtract_rep_mean` and `estimate_k0`, the all-spoke pass of the centre solve now uses the raw data (the
+  residuals summed to zero there), and residual frames no longer get predicted centre samples added
+  (`frames.py:549-555`, `frames.py:592-595`, `frames.py:633-634`).
 
 - A peri bin that gets no spokes no longer raises: a warning names the empty bins and they are all-zero frames
   (`perievent.py:220-225`). It raises only when no spokes are selected at all (`perievent.py:218-219`).

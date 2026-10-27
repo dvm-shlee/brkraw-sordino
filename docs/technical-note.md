@@ -496,6 +496,65 @@ frame open: `FramePlan.max_open` is `n_frames` (`frames.py:170-177`) and that is
 uses (`hook.py:715`, reported as `recon_frames_open`, `hook.py:736`). A plan with many bins is refused by the
 size check under a small `max_memory_gb`.
 
+### 10.2 Repetition-pattern removal (`rep_pattern`; `frames.py`, `serial.py`)
+
+Every frame position $k$ covers the same spoke set $S_k$ in every repetition $r$, so every frame carries the same
+undersampling artifact. With $d_{kr}$ the processed samples of $S_k$ in repetition $r$ (after the phase factor,
+the off-resonance correction and the trimming, `frames.py:548-572`), $A_k$ the type-2 NUFFT of the frame's own kept
+trajectory, $W_k$ the density weights (times the grid-shift phase) and $s_k/n_f$ the frame scale (section 10), a
+frame image per channel is $y_{kr}=\tfrac{s_k}{n_f}A_k^{H}W_k d_{kr}$. For a static object $x$ with
+$d_{kr}=A_k x+n_{kr}$,
+
+$$y_{kr}=\tfrac{s_k}{n_f}\,T_k\,x+\text{noise},\qquad T_k=A_k^{H}W_kA_k,$$
+
+so the frame is the object plus the pattern $P_k=\tfrac{s_k}{n_f}T_kx-x$, which does not depend on $r$. The
+adjoint, the weights and the corrections are linear in $d$, so the pattern is removed as a subtraction of
+complex images; after the magnitude the subtraction would no longer commute, so it precedes it. With a small
+time signal $\delta_r$ the pattern of the mean image is removed; $P_k(\delta_r)$ is second order in
+$\delta/x$ times the aliasing and is not repetition-locked, so neither mode removes it.
+
+**All-spoke image.** $x_{\mathrm{full}}$ is the complex image of all spokes read, with the same weights, kept
+samples, grid shift and (with `estimate_k0`) predicted centre samples, at the frame gain:
+$x_{\mathrm{full}}=\frac{1}{R\,n_f}\sum_{k,r}A_k^{H}W_kd_{kr}$ (plus the centre samples), the time mean of the frames
+for equal frame scales. It is computed from the raw data, not from residuals (`frames.py:592-629`).
+
+**`model`.** $\hat x$ is a few conjugate-gradient steps (`serial.conjugate_gradient`, the `estimate_k0` count
+`kcentre.k0_iterations`) on the all-spoke normal operator with the frame weights, `ToeplitzKernel` or
+`SampleNormal` (`frames.py:597-613`). For every written frame, on that frame's own ranges (the union of ranges
+of a peri-event bin), kept samples, weights and centre samples,
+
+$$z_{kr}=y_{kr}-P_k,\qquad P_k=\tfrac{s_k}{n_f}\,T_k\hat x-x_{\mathrm{full}},$$
+
+where $T_k\hat x$ is a type-2 NUFFT, the weights and a type-1 NUFFT (`serial.normal_on`, `serial.py:229-253`;
+`frames.py:644-668`). The predicted centre samples of the frame come from the same CG solution that fills the
+centre (`frames.py:600-606`). No data of other repetitions enter the pattern, so it works with one repetition
+and adds only the noise of $\hat x$ (all $R\,N_{\mathrm{pro}}$ spokes). Nothing is cached per position; the
+operator is applied again for every frame. What remains is $(T_k^{\mathrm{true}}-T_k^{\mathrm{model}})\hat x$:
+trajectory error, a frame-dependent centre error, residual off-resonance phase and weights that differ between
+model and frame.
+
+**`measured`.** With $\bar d_k=\frac1R\sum_rd_{kr}$ the existing repetition mean (`frames.py:512-536`),
+
+$$z_{kr}=\tfrac{s_k}{n_f}A_k^{H}W_k\,(d_{kr}-\bar d_k)+x_{\mathrm{full}},$$
+
+that is the `subtract_rep_mean` residual plus one image added to every frame. It has no model error but
+injects $1/R$ of one frame's noise variance, and it removes any signal locked to the repetition (a task period
+that divides the repetition length) together with the pattern. The predicted centre samples are in
+$x_{\mathrm{full}}$ and not in the residual (`frames.py:633-634`). For a static noise-free object and exact
+$A_k$, `model` and `measured` agree.
+
+**The centre with a repetition mean.** The predicted centre samples are identical in every repetition, so the
+residual of a centre sample is zero and `subtract_rep_mean` frames carry no centre term; the all-spoke pass
+that feeds the `estimate_k0` solve uses the raw data, because residuals sum to zero over the repetitions and
+would leave the solve with no object (`frames.py:549-555`, `frames.py:592-595`, `frames.py:633-634`).
+
+**Options and cost.** `rep_pattern` needs a frame plan and is refused with `subtract_rep_mean`; `measured`
+needs 2 or more repetitions and is refused with `peri_censor` (`frames.py:261-271`, `frames.py:291-292`).
+The key gets `{"mode", "xhat": "cg", "n_iter"}` only when the mode is not `none` (`hook.py:415-417`), so
+default keys are unchanged. The size estimate adds three volumes per channel (`memguard.py:277-278`): the
+all-spoke image or $\hat x$, $x_{\mathrm{full}}$ and the pattern volume of the frame being written. `model`
+costs two extra NUFFTs per channel and frame.
+
 ## 11. Output scaling (`hook.convert`)
 
 Converted NIfTI files are stored as unsigned 16-bit integers with a linear scaling in the header. For each
@@ -631,6 +690,7 @@ directions come from the method parameter `TrajectoryMode` (`Default`, `GoldenSa
 | `peri_event` | `null` | Event-related frames: one image per time bin relative to an event that repeats every `period` seconds, each bin holding that bin's spokes from every event. Comma-separated fields `period=` and `bin=` (seconds, both required), with optional `onset=` (seconds to the first event, default 0), `start=` (seconds from onset to the first bin, default 0, may be negative), `bins=` (default `ceil(period / bin)`, the whole period; a warning when the bins run past the period) and `events=` (default: every event that fits). Example: `peri_event=period=20,bin=1,onset=1`. A bin that gets no spokes is an all-zero frame with a warning; only a plan with no spokes raises. The frame axis is bins: `pixdim[4]` is the bin width. The golden trajectory repeats every `NPro` spokes, so events land on `NPro / gcd(period_spokes, NPro)` distinct phases: when the period divides the repetition evenly the bins re-sample a few directions many times, and the log reports the unique spoke count to judge against the Nyquist count of the reconstruction matrix. Details: section 10.1 (`perievent.py:154-259`). |
 | `peri_censor` | `null` | Path to a 1D file of 0/1, one row per equal block of the stream's spokes (rows must divide the spokes read; each row covers spokes / rows spokes), 1 = usable. A peri-event range is used only when all of its spokes are usable; the per-bin scale divides by the ranges that reached each bin. Needs `peri_event` (a `ValueError` without it). Also excludes the censored spokes from the `subtract_rep_mean` average. Section 10.1 (`perievent.py:126-151`, `frames.py:229-231`). |
 | `subtract_rep_mean` | `false` | Average each spoke position over the repetitions read (censored spokes excluded) and subtract that average from every occurrence before gridding. What is fixed for a spoke position cancels, leaving what varies between repetitions. Needs a frame plan (`peri_event` or a frame option; a `ValueError` without one) and at least 2 repetitions. Task-neutral only when the repetition length is not a multiple of the event period. Section 10.1 (`frames.py:232-235`, `frames.py:462-483`). |
+| `rep_pattern` | `none` | `none`, `model` or `measured`. Removes the repetition-locked undersampling pattern from every complex frame before the magnitude. `model` subtracts the pattern of a forward model of the frame's own spokes (any number of repetitions); `measured` writes the `subtract_rep_mean` residual plus the all-spoke image (at least 2 repetitions, not with `peri_censor`). Needs a frame plan, refused together with `subtract_rep_mean` (each a `ValueError`). Keyed only when not `none`. Section 10.2 (`frames.py:261-271`, `frames.py:584-668`). |
 
 Read-time options (they choose what is returned from the cache and are not part of its key):
 
@@ -658,7 +718,7 @@ brkraw convert /path/to/study -s 11 -r 1 \
   one. Example (two approved coronal scans, readout `H_F`, quadruped, `Head_Supine`,
   `subject_ras`): index 0 widens posterior-anterior, 1 left-right, 2 inferior-superior; the
   output array holds index 1 on axis 0 and index 0 on axis 1.
-- **`estimate_k0` is on by default** and costs time and memory. Memory is a fixed part plus one chunk of spokes and does not grow with spokes or frames. When the default limit is too small for a large scan the size check stops with an offer of a larger limit; `estimate_k0: false` needs less. Set to `true` explicitly it stops with an error when the values it needs are missing (the sequence timing, or with `correct_ramptime: false` only `AcqDelayTotal`, `PVM_EffSWh`, `OverSampling`); left at the default it is switched off with an info line then. Caches made before it became the default are found again only with `estimate_k0: false`. (Default `hook.py:159-162`; the error `hook.py:195-214`; the switch-off with an info line `hook.py:799-803`; the size check `memguard.py:262-274`.)
+- **`estimate_k0` is on by default** and costs time and memory. Memory is a fixed part plus one chunk of spokes and does not grow with spokes or frames. When the default limit is too small for a large scan the size check stops with an offer of a larger limit; `estimate_k0: false` needs less. Set to `true` explicitly it stops with an error when the values it needs are missing (the sequence timing, or with `correct_ramptime: false` only `AcqDelayTotal`, `PVM_EffSWh`, `OverSampling`); left at the default it is switched off with an info line then. Caches made before it became the default are found again only with `estimate_k0: false`. (Default `hook.py:159-162`; the error `hook.py:195-214`; the switch-off with an info line `hook.py:799-803`; the size check `memguard.py:304-322`.)
 - **`estimate_k0` with `correct_ramptime: false` and on a general ZTE.** Before, `correct_ramptime: false` switched `estimate_k0` off (an explicit `true` was an error) and a general ZTE was always reconstructed without it. Now both follow `estimate_k0` (default `true`): those results change and their caches get a new key (`estimate_k0: false` gives the old result and finds the old caches). The virtual centre samples continue each spoke's straight line back to the RF centre. On SORDINO data with `correct_ramptime: false` the straight line only approximates the ramped spokes: treat that combination as an experiment. (The option is resolved independently of `correct_ramptime` at `hook.py:158-163`; the check `hook.py:208-214`; the straight trajectory `hook.py:219-221`.)
 - **Wide centre gap.** The fill is a least-squares solve with the FOV as the only constraint. Its iterations follow the gap (the first kept sample's distance from k = 0 in k-grid units): 10 up to 1.3, 40 up to 1.8, 160 above (synthetic data: K0 within 0.1 % up to 1.8 and 0.5 % at 2.0; 10 iterations alone degrade above 1.3). Above 2.0 a warning gives the gap; the reconstruction still runs. `ignore_samples: 0` narrows the gap by 1 / OverSampling when the first sample is usable. The gap is in `kspace_gap` of the cache `.json`.
 - **ZTE-mode scans of the SORDINO sequence.** `sordino_260801` can run in ZTE mode (`SequenceMode = ZTE`: per the sequence source the gradient reaches each spoke's vector before the RF pulse and stays constant while sampling). The method file still holds `RampTime` and `MaximizeRampTime`, and the hook does not tell such scans apart from the header: it applies the SORDINO ramp model. Set `correct_ramptime: false` (and keep `estimate_k0: true`) for them yourself.
@@ -667,7 +727,7 @@ brkraw convert /path/to/study -s 11 -r 1 \
   The cache holds 16 n_ch M1 M2 M3 bytes per frame (section 10). The size
   check runs first and stops with the sizes; use larger `frame_spokes`, fewer repetitions
   (`num_frames`) or `frame_spokes: repetition`. A sliding window also keeps one running-sum
-  copy per open frame start (`frame_spokes` / `frame_step` copies). (`memguard.py:262-274`.)
+  copy per open frame start (`frame_spokes` / `frame_step` copies). (`memguard.py:304-322`.)
 - **`recon_matrix` grid and values.** The grid is the one ParaVision writes for a scan of that matrix with the same FOV and centre, so the FOV edges can move by half a full-resolution voxel. Values follow the full image's low-pass; golden scans with `capped` or `pipe` weights re-estimate the weights on the kept samples, which changes the global scale relative to the full image (the shape is kept). (Weights on the kept samples `lowres.py:13-14`; the scale `lowres.py:213-224`; the grid affine `lowres.py:227-249`.)
 - **NIfTI is uint16 with slope and intercept.** Converted files are stored as 16-bit integers; the true value is `inter + slope * stored`.
 - **Frames:** `correct_spoketiming` cannot be combined with frames (use

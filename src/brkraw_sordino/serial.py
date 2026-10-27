@@ -226,5 +226,33 @@ def forward(x: np.ndarray, traj: np.ndarray) -> np.ndarray:
     return out
 
 
+def normal_on(x: np.ndarray, traj: np.ndarray, w: np.ndarray) -> np.ndarray:
+    """A^H diag(w) A x for the samples at ``traj`` (raw sums, no ``norm_factor``).
+
+    The normal operator of one set of samples: a type-2 NUFFT to the samples, the real weights
+    ``w`` (flat), a type-1 NUFFT back, both plans at ``KERNEL_UPSAMPFAC`` and ``NUFFT_EPS`` like
+    ``SampleNormal``. ``x`` is one image (3 axes) or a stack of channels (channels first); the
+    result has the shape of ``x``. Theory: rep-pattern-removal (section 3, T_k x_hat).
+    """
+    arr = np.asarray(x, dtype=np.complex128)
+    single = arr.ndim == 3
+    stack = arr[None] if single else arr
+    shape = tuple(stack.shape[1:])
+    cols = omega_columns(traj)
+    weight = np.asarray(w, dtype=np.float64).reshape(-1)
+    kw = {"upsampfac": KERNEL_UPSAMPFAC}
+    t2 = finufft.Plan(2, shape, n_trans=1, eps=NUFFT_EPS, dtype="complex128", **kw)
+    t2.setpts(*cols)
+    t1 = finufft.Plan(1, shape, n_trans=1, eps=NUFFT_EPS, dtype="complex128", **kw)
+    t1.setpts(*cols)
+    out = np.empty_like(stack)
+    for ch in range(stack.shape[0]):
+        y = t2.execute(np.ascontiguousarray(stack[ch]))
+        y *= weight
+        out[ch] = t1.execute(y).reshape(shape)
+    return out[0] if single else out
+
+
 __all__ = ["NUFFT_EPS", "KERNEL_UPSAMPFAC", "norm_factor", "spoke_ranges", "omega_columns",
-           "density", "Adjoint", "ToeplitzKernel", "SampleNormal", "conjugate_gradient", "forward"]
+           "density", "Adjoint", "ToeplitzKernel", "SampleNormal", "conjugate_gradient", "forward",
+           "normal_on"]
