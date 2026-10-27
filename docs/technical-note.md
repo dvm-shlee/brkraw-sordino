@@ -266,7 +266,7 @@ channels are returned separately. `as_complex` returns real and imaginary parts 
 
 ## 8. Image grid, affine and orientation (`recon.py`, `hook.py`, `orientation.py`)
 
-### 8.1 Grid shift (WI-0119)
+### 8.1 Grid shift
 
 The image is placed where the BrkRaw affine says. The k-space phase origin of the scan is the FOV
 centre $\mathbf c$ (the sequence moves it to the slice-pack position with the receiver frequencies
@@ -339,12 +339,12 @@ The dead time leaves the centre unmeasured. The first acquired sample lies at th
 $\kappa_0=T_0/(\Delta t\,\sigma)$ k-grid units ($1/\mathrm{FOV}$; one unit is $\sigma$ samples along a spoke), the
 first kept sample at $(T_0+n_{\mathrm{ign}}\Delta t)/(\Delta t\,\sigma)$. Without `estimate_k0` this centre is left empty. Both radii are logged (info for a general ZTE gap over
 one unit, debug otherwise) and kept as `scan._sordino_recon_meta["kspace_gap"]` and in the recon cache
-`.json`. The estimate runs on every trajectory (WI-0137): the ramp-corrected SORDINO one, the straight one of
+`.json`. The estimate runs on every trajectory: the ramp-corrected SORDINO one, the straight one of
 `correct_ramptime=false` and a general ZTE; it is switched off with an info message only when the values the
 virtual samples need are missing (and stops with an error when `estimate_k0` was given).
 
 **Gap size.** About $\tfrac43\pi\kappa^3$ grid points lie inside the gap of radius $\kappa$ (4 at $\kappa=1$, 14 at 1.5),
-and only the FOV support determines them. Synthetic sweep (WI-0137: straight spokes, two objects filling about 60 % and
+and only the FOV support determines them. Synthetic sweep (straight spokes, two objects filling about 60 % and
 90 % of the FOV, matrix 24 and 48, $\sigma=4$, noise free and with 2 % and 5 % noise): with 10 iterations the
 relative $K_0$ error (noise free) is at most 0.4 % up to $\kappa=1.3$, 0.2–8 % at 1.4 and 4–73 % at 1.5 (with 5 % noise:
 at most 2 % up to 1.3, matrix 24); with 40 iterations it
@@ -385,7 +385,7 @@ within the NUFFT tolerance, and the hook picks one (no option):
   $T[\mathbf d]=\sum_m w_m\,e^{\mathrm i\boldsymbol\omega_m\cdot\mathbf d}$, $\mathbf d\in[-(M-1),M-1]^3$. $T$ is one type-1 NUFFT
   onto a $2\mathbf M$ grid, accumulated chunk by chunk, and each CG step is two FFTs of size $2\mathbf M$ per axis
   (circulant embedding, Wajer and Pruessmann [7]). Memory about 1 KiB per output voxel plus 64 MiB, whatever the sample count;
-  the faster form (1.2 to 8 times on the measured shapes).
+  the faster form.
 - *Samples*: a type-2 NUFFT to the samples, the weights, a type-1 NUFFT back. Memory about 128 B per voxel plus
   80 B per sample of a frame plus 16 MiB.
 
@@ -564,7 +564,7 @@ Sources 1-6 were checked against Crossref and the other public registries with t
 ## Appendix A. Options and practical notes
 
 `brkraw hook docs sordino` shows one line per option (`src/brkraw_sordino/docs.md`). This appendix is the full
-description that page used to hold (moved unchanged, WI-0138): how to pass options, what each option does, and what
+description that page used to hold (moved unchanged): how to pass options, what each option does, and what
 to watch for.
 
 ### A.1 Passing options
@@ -660,7 +660,7 @@ brkraw convert /path/to/study -s 11 -r 1 \
   `subject_ras`): index 0 widens posterior-anterior, 1 left-right, 2 inferior-superior; the
   output array holds index 1 on axis 0 and index 0 on axis 1.
 - **`estimate_k0` is on by default** and costs time and memory. Memory is a fixed part plus one chunk of spokes and does not grow with spokes or frames. When the default limit is too small for a large scan the size check stops with an offer of a larger limit; `estimate_k0: false` needs less. Set to `true` explicitly it stops with an error when the values it needs are missing (the sequence timing, or with `correct_ramptime: false` only `AcqDelayTotal`, `PVM_EffSWh`, `OverSampling`); left at the default it is switched off with an info line then. Caches made before it became the default are found again only with `estimate_k0: false`.
-- **`estimate_k0` with `correct_ramptime: false` and on a general ZTE (WI-0137).** Before, `correct_ramptime: false` switched `estimate_k0` off (an explicit `true` was an error) and a general ZTE was always reconstructed without it. Now both follow `estimate_k0` (default `true`): those results change and their caches get a new key (`estimate_k0: false` gives the old result and finds the old caches). The virtual centre samples continue each spoke's straight line back to the RF centre. On SORDINO data with `correct_ramptime: false` the straight line only approximates the ramped spokes: treat that combination as an experiment.
+- **`estimate_k0` with `correct_ramptime: false` and on a general ZTE.** Before, `correct_ramptime: false` switched `estimate_k0` off (an explicit `true` was an error) and a general ZTE was always reconstructed without it. Now both follow `estimate_k0` (default `true`): those results change and their caches get a new key (`estimate_k0: false` gives the old result and finds the old caches). The virtual centre samples continue each spoke's straight line back to the RF centre. On SORDINO data with `correct_ramptime: false` the straight line only approximates the ramped spokes: treat that combination as an experiment.
 - **Wide centre gap.** The fill is a least-squares solve with the FOV as the only constraint. Its iterations follow the gap (the first kept sample's distance from k = 0 in k-grid units; SORDINO data: 0.5-1.2): 10 up to 1.3, 40 up to 1.8, 160 above (synthetic data: K0 within 0.1 % up to 1.8 and 0.5 % at 2.0; 10 iterations alone degrade above 1.3). Above 2.0 a warning gives the gap; the reconstruction still runs. `ignore_samples: 0` narrows the gap by 1 / OverSampling when the first sample is usable. The gap is in `kspace_gap` of the cache `.json`.
 - **ZTE-mode scans of the SORDINO sequence.** `sordino_260801` can run in ZTE mode (`SequenceMode = ZTE`: per the sequence source the gradient reaches each spoke's vector before the RF pulse and stays constant while sampling). The method file still holds `RampTime` and `MaximizeRampTime`, and the hook does not tell such scans apart from the header: it applies the SORDINO ramp model. Set `correct_ramptime: false` (and keep `estimate_k0: true`) for them yourself.
 - **Golden frames need disk.** The cache holds one complex128 volume per frame and channel.

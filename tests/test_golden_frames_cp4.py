@@ -173,6 +173,6 @@ def test_docs_golden_options_are_real_options(tmp_path):
     cli = re.findall(r"--hook-arg sordino:([a-z_]+)=([^\s\\]+)", part)
     assert {k for k, _ in cli} == {"frame_spokes", "frame_step"}
     hook._build_options(dict({k: v for k, v in cli}, cache_dir=str(tmp_path)))
-    for word in ("49.8 GB", "pixdim"):
+    for word in ("pixdim",):
         assert word in part
     assert "ProUnderSampling" in NOTE_MD.read_text()

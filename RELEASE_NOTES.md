@@ -26,18 +26,19 @@ Behaviour changes in the peri-event stage:
   `frames.py:170-177`, used at `hook.py:715`), so a plan with many bins is refused under a small `max_memory_gb`.
 
 Tests: two tolerances changed to match the NUFFT tolerance (`serial.NUFFT_EPS`), not a change of results: the
-golden density comparison of the weights path and the product path is 1e-10 (was 1e-12), and the chunked-sum
-comparison of the serial reconstruction is 1e-6 times the maximum (was 1e-10); both failed under finufft 2.4.1.
+golden density comparison of the weights path and the product path is 1e-10 (was 1e-12;
+`tests/test_golden_density.py:182-184`), and the chunked-sum comparison of the serial reconstruction is 1e-6 times
+the maximum (was 1e-10; `tests/test_serial_recon.py:423-425`); both failed under finufft 2.4.1.
 
 Documentation: measured project numbers were removed from the package docs.
 
 # Unreleased (branch golden-weights-k0, on brkraw-060)
 
-Documentation (WI-0138): `brkraw hook docs sordino` (`src/brkraw_sordino/docs.md`) is now a CLI usage page of
+Documentation: `brkraw hook docs sordino` (`src/brkraw_sordino/docs.md`) is now a CLI usage page of
 37 lines, 80 columns: three usage lines and one line per option with its default. The option tables, cautions,
 developer checks and the size-estimate table it held moved unchanged to Appendix A of `docs/technical-note.md`.
 
-Behaviour change, `estimate_k0` on every trajectory (WI-0137, D-0234): `estimate_k0` and `correct_ramptime` are now
+Behaviour change, `estimate_k0` on every trajectory: `estimate_k0` and `correct_ramptime` are now
 independent. With `correct_ramptime: false` the k-space centre is estimated on the straight trajectory (the virtual
 samples continue each spoke's line back to the RF centre); a general ZTE (no `RampTime`) is no longer reconstructed
 without it. The default stays `estimate_k0: true`, so **results with `correct_ramptime: false` and general ZTE results
@@ -49,20 +50,18 @@ with 10 the fill degrades above 1.3); the count enters the cache key only when i
 2.0 k-grid units gives a warning (the reconstruction still runs). ZTE-mode scans of `sordino_260801` (`SequenceMode = ZTE`) are not detected from the header: set
 `correct_ramptime: false` for them.
 
-New option `recon_matrix` (WI-0132, D-0230): reconstruct on a smaller matrix at the same FOV (`-H sordino:recon_matrix=60`
+New option `recon_matrix`: reconstruct on a smaller matrix at the same FOV (`-H sordino:recon_matrix=60`
 or `[60, 60, 60]`; one ratio on every axis, not above `PVM_Matrix`). Each spoke is cut at the new Nyquist radius (a
 sphere, no taper), the density weights and `estimate_k0` work on the kept samples, and the values follow the full image's
 low-pass. The affine is the one ParaVision writes for that matrix (voxels `Matrix / recon_matrix` larger, the FOV centre
-kept). Leaving it out changes nothing (same results and cache keys). On the phantom (scan 13, 120^3 to 60^3): NRMSE 0.033
-against the full image's Fourier low-pass, scale within 0.2 %, affine equal to the native 60^3 scan 18. Golden scans
-with `capped`/`pipe` weights: same shape, global scale 0.74 of the full image (weights re-estimated on the kept samples).
+kept). Leaving it out changes nothing (same results and cache keys).
 
-Documentation (WI-0122, no behaviour change): `README.md` is now the short entry (description, install, hook install,
+Documentation: `README.md` is now the short entry (description, install, hook install,
 minimal use). `brkraw hook docs sordino` (`src/brkraw_sordino/docs.md`) shows the option tables, defaults and cautions.
 The algorithms, with their equations, are in `docs/technical-note.md`. `tests/test_docs.py` keeps the option tables in
 step with the code.
 
-Sequence generations (WI-0125, no change to results or cache keys): the sequences are now named 0.1 (`mjm_zte_231005`),
+Sequence generations: the sequences are now named 0.1 (`mjm_zte_231005`),
 0.2 (`sordino_260122_trig`), 0.3 (`sordino_260801`, golden sample extension) and 1.x (`sordino`, the stable release);
 zte stays. The earlier "v1/v2/v3" wording is gone from the docs and log messages. 0.3 and 1.x share one ramp model and
 are told apart by the method name only (`"0.3 or 1.x"` when it says neither). `get_dataobj_info` has two new items,
@@ -71,7 +70,7 @@ changed. Internally the model values `v1`/`v2`/`v3`/`zte` stay, so trajectory ca
 
 Behaviour changes for every scan:
 
-- Image grid (WI-0119): images are now placed where the scan's affine says
+- Image grid: images are now placed where the scan's affine says
   (grid shift = affine index of the FOV centre minus the NUFFT centre `N // 2`).
   For the axial phantom scans this moves them half a voxel down the slice axis
   (they sat 0.1 mm too high at 0.2 mm voxels). Default and golden trajectories,
