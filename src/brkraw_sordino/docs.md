@@ -28,6 +28,7 @@ frame options (golden scans; a Default scan only with a spoke count):
   peri_event=null            event bins: period=,bin= (bins=ceil(period/bin))
   peri_censor=null           0/1 file, one row per spoke block; needs peri_event
   subtract_rep_mean=false    subtract repetition mean (needs frames, 2+ reps)
+  rep_pattern=none           remove the repeated pattern: none, model, measured
 
 read-time options (not in the cache key):
   frames=null                frames to return: int, list or "start:stop:step"
@@ -36,5 +37,4 @@ read-time options (not in the cache key):
   allow_short_fid=true       short FID: reconstruct the complete frames only
 
 ZTE-mode scans of sordino_260801: set correct_ramptime=false yourself.
-Details, cautions, caches and sizes: docs/technical-note.md, Appendix A,
-in the brkraw-sordino repository.
+Details, caches, sizes: docs/technical-note.md, Appendix A (repository).

@@ -41,6 +41,10 @@ class Options:
     # (frames.recon_frames); only task-neutral when the repetition length is not
     # a multiple of the event period.
     subtract_rep_mean: bool = False
+    # Remove the repetition-locked undersampling pattern in the reconstruction (frames.py):
+    # "none", "model" (forward model of the frame's own spokes) or "measured" (repetition mean).
+    # Keyed only when not "none" (hook._build_cache_params).
+    rep_pattern: str = "none"
 
 
 __all__ = [

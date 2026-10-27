@@ -144,6 +144,7 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         "golden_weights",
         "recon_matrix",
         "subtract_rep_mean",
+        "rep_pattern",
     } | set(READ_KEYS) | set(frames_mod.FRAME_KEYS)
     unknown_keys = sorted(set(kwargs.keys()) - known_keys)
     if unknown_keys:
@@ -184,6 +185,7 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         peri_event=perievent.parse_peri_event(kwargs.get("peri_event")),
         peri_censor=kwargs.get("peri_censor") or None,
         subtract_rep_mean=parse_bool("subtract_rep_mean", kwargs.get("subtract_rep_mean", False)),
+        rep_pattern=frames_mod.parse_rep_pattern(kwargs.get("rep_pattern")),
     )
 
 
@@ -393,7 +395,7 @@ def _build_cache_params(
     # without frames (one repetition per frame) is the key from before CP3
     keyed = {k: v for k, v in asdict(options).items()
              if k not in RECON_KEY_EXCLUDED and k not in frames_mod.FRAME_KEYS
-             and k not in ("golden_weights", "recon_matrix", "subtract_rep_mean")}
+             and k not in ("golden_weights", "recon_matrix", "subtract_rep_mean", "rep_pattern")}
     params = {
         "scan_id": getattr(scan, "scan_id", None),
         "reco_id": reco_id,
@@ -410,6 +412,9 @@ def _build_cache_params(
         if getattr(options, "subtract_rep_mean", False):
             # the images differ, so they must not share a cache entry with a plain run
             params["subtract_rep_mean"] = True
+        if getattr(options, "rep_pattern", "none") != "none":
+            # the images differ; the solve behind them is part of the key
+            params["rep_pattern"] = frames_mod.rep_pattern_key(options, recon_info)
     if dcf.is_golden(recon_info):
         # golden trajectories: the density-weight rule of the golden_weights choice (WI-0113 runs 5
         # and 6; the default "capped" is the run-5 key); Default keys unchanged
@@ -699,7 +704,8 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
         budget = int(limit["limit_nbytes"]) - read_nbytes - dcf_share
         plan = memguard.recon_plan(
             int(recon_info["NPro"]), int(recon_info["NPoints"]), n_ch, vol,
-            estimate_k0=bool(options.estimate_k0), budget_nbytes=budget)
+            estimate_k0=bool(options.estimate_k0) or getattr(options, "rep_pattern", "none") == "model",
+            budget_nbytes=budget)
         recon_share = max(plan["recon_nbytes"], int(stc_stage_nbytes))
         chunk_spokes = plan["chunk_spokes"]
         n_chunks = plan["n_chunks"]
@@ -713,7 +719,8 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
                 n_virtual = int(_leading_points(recon_info, options).shape[1])
             recon_share += memguard.frames_nbytes(
                 frame_plan.max_open, n_ch, vol, estimate_k0=bool(options.estimate_k0),
-                n_pro=int(recon_info["NPro"]), n_virtual=n_virtual)
+                n_pro=int(recon_info["NPro"]), n_virtual=n_virtual,
+                rep_pattern=getattr(options, "rep_pattern", "none") != "none")
         recon_share += dcf_share
     info: Dict[str, Any] = {
         "shape": shape,
