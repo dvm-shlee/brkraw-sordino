@@ -1,7 +1,8 @@
 """frame_static='cg': x_hat as the static image of rep_pattern='model' frames (frames.py).
 
 Small synthetic scans of test_rep_pattern (16^3 grid, 800 spokes per repetition), data made by the
-forward model of a smooth phantom and a small time signal. No real data.
+forward model of a smooth phantom and a small time signal. Frames are the golden method subsets (40
+spokes, 20 positions per repetition). No real data.
 """
 import io
 
@@ -15,13 +16,18 @@ from brkraw_sordino.traj import trajectory_rows
 
 from test_hook_read import _Fid, _Scan, _recon_info
 from test_peri_event_corrections import _encode
-from test_rep_pattern import FS, POSITIONS, _info, _opts, _phantom, _rel, _roi, _samples
+from test_rep_pattern import _info, _opts, _phantom, _rel, _roi, _samples
 from test_serial_recon import N_POINTS, SHAPE
+
+POSITIONS = 20           # 800 spokes per repetition / the 40-spoke method subset
+SUBSET = None            # frame_spokes at its default: the method subset
+FS = SUBSET
+EXACT_ITER = 100         # noise-free solve long enough for the residual to vanish
 
 
 def _frames(tmp_path, info, samples, out=None, **kw):
-    """The complex frames (n_frames, *SHAPE) of frame_spokes=FS; ``out`` gets the record of the solve."""
-    kw.setdefault("frame_spokes", FS)
+    """The complex frames (n_frames, *SHAPE) of the golden subset frames; ``out`` gets the record of the solve."""
+    kw.setdefault("frame_spokes", SUBSET)
     options = _opts(tmp_path, **kw)
     plan = frames.make_plan(info, options)
     buf = io.BytesIO()
@@ -45,21 +51,29 @@ def _xhat(tmp_path, info, samples, n_iter=10):
     return _frames(tmp_path, info, samples, **opts)[1][0]
 
 
-def test_static_object_gives_x_hat_in_every_frame_closer_to_the_truth_than_the_adjoint(tmp_path):
+def test_static_noise_free_object_gives_x_hat_exactly_in_every_frame(tmp_path):
+    # converged CG on consistent data: A x_hat = d, the residual term vanishes and y_k = x_hat
+    info, x = _info(2), _phantom()
+    samples = _samples(tmp_path, info, [x, x])
+    rec = {}
+    plan, cg = _frames(tmp_path / "cg", info, samples, out=rec, rep_pattern="model", frame_static="cg",
+                       frame_static_iter=EXACT_ITER)
+    xhat = _xhat(tmp_path / "xhat", info, samples, n_iter=EXACT_ITER)
+    assert plan.n_frames == 2 * POSITIONS
+    assert rec["solver"] == "cg" and rec["n_iter"] == EXACT_ITER and rec["lambda"] == 0.0
+    assert rec["relative_residual"] < 1e-5
+    for f in cg:
+        assert _rel(f, xhat) < 1e-3
+
+
+def test_cg_frames_are_closer_to_the_truth_than_the_adjoint_frames(tmp_path):
     info, x = _info(2), _phantom()
     samples = _samples(tmp_path, info, [x, x])
     rec = {}
     plan, cg = _frames(tmp_path / "cg", info, samples, out=rec, rep_pattern="model", frame_static="cg")
     _, adj = _frames(tmp_path / "adj", info, samples, rep_pattern="model")
-    xhat = _xhat(tmp_path / "xhat", info, samples)
     assert plan.n_frames == 2 * POSITIONS and cg.shape == adj.shape
-    mean_cg, mean_adj = cg.mean(axis=0), adj.mean(axis=0)
-    assert _rel(mean_cg, xhat) < _rel(mean_adj, xhat)
-    assert _rel(mean_cg, xhat) < 0.25
-    assert abs(np.linalg.norm(mean_cg) / np.linalg.norm(xhat) - 1) < 0.1      # the units of x_hat
-    assert _err(mean_cg, x) < _err(mean_adj, x)
-    # every frame is x_hat plus the (small) residual term of the CG solve
-    assert max(_rel(f, xhat) for f in cg) < 0.5
+    assert _err(cg.mean(axis=0), x) < _err(adj.mean(axis=0), x)
     assert rec["solver"] == "cg" and rec["n_iter"] == 10 and rec["lambda"] == 0.0
     assert 0 < rec["relative_residual"] < 1.0 and rec["iterations_run"] >= 1
 

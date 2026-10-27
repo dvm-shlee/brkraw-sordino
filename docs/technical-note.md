@@ -771,9 +771,12 @@ directions come from the method parameter `TrajectoryMode` (`Default`, `GoldenSa
 | `anat_solver` | `adjoint` | `adjoint` or `cg`. `cg` reconstructs the image of `frame_spokes: all` by conjugate gradients on the normal equations of all spokes instead of the adjoint (section 10.3). Needs `frame_spokes: all`; refused with `peri_event`, `frame_step`, `frame_accumulate`, `rep_pattern`, `subtract_rep_mean`. Keyed only when not `adjoint`. |
 | `anat_cg_iter` | `10` | CG iterations of `anat_solver: cg` (a positive integer; refused with the adjoint). |
 | `anat_lambda` | `0.0` | Tikhonov weight of `anat_solver: cg`, at least 0, absolute (its useful scale depends on the data gain). Refused with the adjoint. |
-| `frame_static` | `adjoint` | `adjoint` or `cg`. With `cg` the static part of the `rep_pattern: model` frames is $\hat x$ itself (CG) instead of its adjoint image, and the residual term is scaled to the units of $\hat x$ (section 10.4). Needs `rep_pattern: model`; refused with `anat_solver: cg`. Keyed only when not `adjoint`. |
-| `frame_static_iter` | `10` | CG iterations of `frame_static: cg` (a positive integer; refused with the adjoint). |
-| `frame_static_lambda` | `0.0` | Tikhonov weight of `frame_static: cg`, at least 0, absolute. Refused with the adjoint. |
+
+Static image of the `rep_pattern: model` frames (section 10.4):
+
+- `frame_static` (default `adjoint`): `adjoint` or `cg`. With `cg` the static part of the `rep_pattern: model` frames is $\hat x$ itself (CG) instead of its adjoint image, and the residual term is scaled to the units of $\hat x$ (section 10.4). Needs `rep_pattern: model`; refused with `anat_solver: cg`. Keyed only when not `adjoint`.
+- `frame_static_iter` (default `10`): CG iterations of `frame_static: cg` (a positive integer; refused with the adjoint).
+- `frame_static_lambda` (default `0.0`): Tikhonov weight of `frame_static: cg`, at least 0, absolute. Refused with the adjoint.
 
 Read-time options (they choose what is returned from the cache and are not part of its key):
 
