@@ -60,7 +60,8 @@ def _samples(tmp_path, info, objects, noise=0.0, seed=7):
 
 
 def _run(tmp_path, info, samples, k0=False, k0_out=None, **kw):
-    options = _opts(tmp_path, frame_spokes=FS, estimate_k0=k0, **kw)
+    kw.setdefault("frame_spokes", FS)
+    options = _opts(tmp_path, estimate_k0=k0, **kw)
     plan = frames.make_plan(info, options)
     vt = kcentre.leading_points(info, 1) if k0 else None
     out = io.BytesIO()
@@ -102,6 +103,32 @@ def test_model_removes_the_repeated_pattern_and_keeps_the_time_signal(tmp_path):
     signal = np.linalg.norm(mean_none[1] - mean_none[0])
     assert signal > 0
     for r in range(3):
+        assert np.linalg.norm(mean_model[r] - mean_none[r]) < 1e-3 * signal
+
+
+def test_model_on_the_golden_subset_frame_plan(tmp_path):
+    # frame_spokes at its default: frames are the 40-spoke method subsets (20 positions per repetition)
+    info = _info(2)
+    x, roi = _phantom(), _roi()
+    samples = _samples(tmp_path, info, [x, x + 0.1 * roi], noise=NOISE)
+    kw = dict(frame_spokes=None)
+    plan, none = _run(tmp_path / "none", info, samples, **kw)
+    _, model = _run(tmp_path / "model", info, samples, rep_pattern="model", **kw)
+    pos = int(info["NPro"]) // 40
+    assert pos == 20
+    assert plan.n_frames == 2 * pos
+
+    def var(im):
+        return float(np.mean(np.var(im.reshape(-1, pos, *SHAPE), axis=1)))
+
+    _, floor = _run(tmp_path / "floor", info, _samples(tmp_path, info, [0 * x] * 2, noise=NOISE, seed=9), **kw)
+    assert var(none) > 2 * var(floor)
+    assert var(model) < 1.5 * var(floor)
+    mean_none = none.reshape(2, pos, *SHAPE).mean(axis=1)
+    mean_model = model.reshape(2, pos, *SHAPE).mean(axis=1)
+    signal = np.linalg.norm(mean_none[1] - mean_none[0])
+    assert signal > 0
+    for r in range(2):
         assert np.linalg.norm(mean_model[r] - mean_none[r]) < 1e-3 * signal
 
 
