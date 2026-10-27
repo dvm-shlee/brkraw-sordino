@@ -420,7 +420,9 @@ def test_hook_plans_the_chunks_from_the_limit_and_the_result_does_not_change(tmp
     assert infos[0]["recon_chunks"] == 1 and infos[1]["recon_chunks"] > 1
     assert seen == [infos[0]["recon_chunk_spokes"], infos[1]["recon_chunk_spokes"]]
     for a, b in zip(results[0], results[1]):
-        assert np.allclose(a, b, rtol=0, atol=1e-10 * np.abs(results[0][0]).max())
+        # chunked sums of NUFFTs that each hold serial.NUFFT_EPS agree to that tolerance (not to
+        # rounding) under finufft 2.4.1, where the old 1e-10 bound failed
+        assert np.allclose(a, b, rtol=0, atol=1e-6 * np.abs(results[0][0]).max())
 
 
 # ----------------------------------------------------------------------------- part 3

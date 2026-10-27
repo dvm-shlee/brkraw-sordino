@@ -168,9 +168,15 @@ class FramePlan:
 
     @property
     def max_open(self) -> int:
-        """Most frame-start copies of the running sum the engine holds at one time (memory)."""
+        """Most image-sized arrays besides the written frame the engine holds at once (memory).
+
+        Ordinary plans: frame-start copies of the running sum. Peri-event plans: one accumulator
+        per bin, all allocated before the first spoke (``recon_frames``), so ``n_frames``.
+        """
         import bisect
 
+        if self.groups is not None:
+            return int(self.n_frames)
         last: Dict[int, int] = {}
         for lo, hi in self.ranges:
             last[lo] = hi
@@ -219,7 +225,14 @@ def make_plan(recon_info: Dict[str, Any], options) -> Optional[FramePlan]:
     """The frame plan, or None for one repetition per frame (``recon_dataobj``)."""
     from .recon import get_num_frames
 
+    peri_on = getattr(options, "peri_event", None) not in (None, False, "")
+    if getattr(options, "peri_censor", None) and not peri_on:
+        raise ValueError("sordino: peri_censor needs peri_event (a peri-event frame plan, for example "
+                         "peri_event=period=20,bin=1); without it the censor file would be ignored.")
     if not is_frame_mode(options, recon_info):
+        if getattr(options, "subtract_rep_mean", False):
+            raise ValueError("sordino: subtract_rep_mean needs a frame plan (peri_event or a frame "
+                             "option such as frame_spokes); without one the option would be ignored.")
         return None
     mode = golden.trajectory_mode(recon_info)
     if mode == "Default" and options.frame_spokes == "subset":
@@ -450,15 +463,25 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
         if plan.n_rep < 2:
             raise ValueError("sordino: subtract_rep_mean needs at least 2 repetitions, "
                              f"this run reads {plan.n_rep}")
+        # censored spokes (peri_censor) are left out of the average so they cannot leak into the
+        # residual of the spokes that are used; a position censored in every repetition gets mean 0
+        censor = perievent.load_censor(getattr(options, "peri_censor", None), plan.n_rep * npro)
         rep_mean = np.zeros((npro, n_rx, n_points), dtype=np.complex64)
+        counts = np.full(npro, plan.n_rep, dtype=np.float32) if censor is None else np.zeros(npro, np.float32)
         for r in range(plan.n_rep):
             for a, b in serial.spoke_ranges(npro, chunk_spokes):
-                rep_mean[a:b] += stream.read(r * npro + a, b - a).astype(np.complex64)
-        rep_mean /= np.complex64(plan.n_rep)
+                k = stream.read(r * npro + a, b - a).astype(np.complex64)
+                if censor is not None:
+                    use = censor[r * npro + a:r * npro + b]
+                    k[~use] = 0
+                    counts[a:b] += use
+                rep_mean[a:b] += k
+        rep_mean /= np.maximum(counts, 1).astype(np.float32)[:, None, None]
         stream.rewind()
         logger.info("subtract_rep_mean: averaged %s repetitions of each of the %s spoke positions "
-                    "(%.2f GiB); every spoke is reconstructed as its deviation from that average.",
-                    plan.n_rep, npro, rep_mean.nbytes / 2**30)
+                    "(%.2f GiB, %s censored spoke(s) left out); every spoke is reconstructed as its "
+                    "deviation from that average.", plan.n_rep, npro, rep_mean.nbytes / 2**30,
+                    0 if censor is None else int((~censor).sum()))
 
     nf = serial.norm_factor(vol)
     shift = grid_shift(recon_info)       # derived from the affine by the hook (WI-0119)

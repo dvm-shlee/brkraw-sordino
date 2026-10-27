@@ -187,9 +187,12 @@ def test_the_reported_phases_match_the_trajectory_period():
     assert _plan("period=19,bin=1").peri["trajectory_phases"] > 9
 
 
-def test_a_bin_without_spokes_is_refused():
-    with pytest.raises(ValueError, match="no spokes"):
-        _plan("period=20,bin=1,bins=400", n_rep=1)
+def test_a_bin_without_spokes_is_kept_as_an_empty_bin():
+    # one repetition is 180 s; 400 bins of 1 s reach far past it, so the late bins are empty
+    plan = _plan("period=20,bin=1,bins=400", n_rep=1)
+    counts = plan.peri["events_per_bin"]
+    assert plan.n_frames == 400 and counts[0] > 0 and counts[-1] == 0
+    assert plan.scales[-1] == 0.0
 
 
 def test_peri_event_turns_on_frame_mode():

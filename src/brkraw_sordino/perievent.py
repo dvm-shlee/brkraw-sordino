@@ -18,13 +18,16 @@ Option syntax (``--hook-arg sordino:peri_event=...``), comma-separated pairs::
     bin      seconds per output bin (required)
     onset    seconds from the start of the data to the first event (default 0)
     start    seconds from event onset to the first bin (default 0, may be negative)
-    bins     number of bins (default: enough to tile one period)
+    bins     number of bins (default: ceil(period / bin), covering the whole period)
     events   maximum number of events to use (default: every event that fits)
 
 Bins tile ``[start, start + bins * bin)`` relative to each onset. With the
 default ``bins`` the tiling covers one whole period, so every spoke of the scan
 lands in exactly one bin and the late bins act as the pre-stimulus baseline of
-the next event.
+the next event. When ``bin`` does not divide ``period`` the last default bin
+runs past the period end (a warning reports by how much). A bin that gets no
+spokes is reported with a warning and written as an all-zero frame; only a plan
+with no spokes at all is refused.
 
 Sampling note: the golden trajectory repeats every ``NPro`` spokes, so the
 distinct trajectory phases an event can land on is ``NPro / gcd(period_spokes,
@@ -171,11 +174,19 @@ def build(recon_info: Dict[str, Any], options, n_rep: int) -> Tuple[
     width = _spokes(spec["bin"], tr_ms, "bin")
     onset = _spokes(spec.get("onset", 0.0), tr_ms, "onset", signed=True) if spec.get("onset") else 0
     start = _spokes(spec.get("start", 0.0), tr_ms, "start", signed=True) if spec.get("start") else 0
-    n_bins = int(spec["bins"]) if "bins" in spec else max(1, period // width)
+    # default: ceil(period / width) bins, so the whole period is binned; when the bin width does
+    # not divide the period the last bin runs past the period end into the next event's first bin
+    n_bins = int(spec["bins"]) if "bins" in spec else max(1, -(-period // width))
     if width * n_bins > period:
-        logger.warning("sordino: peri_event bins cover %s spokes, more than the %s of one period; "
-                       "bins of neighbouring events overlap and spokes are gridded more than once.",
-                       width * n_bins, period)
+        if "bins" in spec or period % width == 0:
+            logger.warning("sordino: peri_event bins cover %s spokes, more than the %s of one period; "
+                           "bins of neighbouring events overlap and spokes are gridded more than once.",
+                           width * n_bins, period)
+        else:
+            logger.warning("sordino: peri_event bin (%s spokes) does not divide the period (%s spokes); "
+                           "the default %s bins cover the whole period and the last bin runs %s spokes "
+                           "into the next event, so those spokes are gridded in two bins.",
+                           width, period, n_bins, width * n_bins - period)
     if width > total:
         raise ValueError(f"sordino: peri_event bin is {width} spokes, more than the {total} read.")
 
@@ -208,9 +219,10 @@ def build(recon_info: Dict[str, Any], options, n_rep: int) -> Tuple[
         raise ValueError("sordino: peri_event selected no spokes; check period, bin, onset and start.")
     empty = [b for b, n in enumerate(used) if n == 0]
     if empty:
-        raise ValueError(f"sordino: peri_event bin(s) {empty} got no spokes; shorten the span or lower "
-                         f"events.")
-    scales = tuple(float(npro) / (used[b] * width) for b in range(n_bins))
+        logger.warning("sordino: peri_event bin(s) %s got no spokes (data too short, events too few, or "
+                       "all ranges censored); they are written as all-zero frames.", empty)
+    # an empty bin has nothing to normalise: scale 0 keeps it an all-zero frame
+    scales = tuple(float(npro) / (used[b] * width) if used[b] else 0.0 for b in range(n_bins))
 
     order = sorted(range(len(ranges)), key=lambda i: ranges[i])
     ranges = tuple(ranges[i] for i in order)
@@ -247,4 +259,9 @@ def build(recon_info: Dict[str, Any], options, n_rep: int) -> Tuple[
     return ranges, groups, scales, info
 
 
-__all__ = ["PERI_KEYS", "CENSOR_KEY", "parse_peri_event", "build"]
+def load_censor(value, total: int):
+    """Public form of the censor loader: a boolean mask over ``total`` stream spokes, or None."""
+    return _load_censor(value, total)
+
+
+__all__ = ["PERI_KEYS", "CENSOR_KEY", "parse_peri_event", "build", "load_censor"]
