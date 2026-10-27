@@ -592,6 +592,46 @@ The key gets `{"solver", "n_iter", "lambda"}` only when the solver is not `adjoi
 unchanged. The size estimate adds five volumes per channel (x, r, p, the operator output and the right-hand
 side; `memguard.frames_nbytes`, `anat_cg`) and counts the K0 solve, which the CG uses.
 
+### 10.4 CG static image in the frames (`frame_static`; `frames.py`)
+
+With `rep_pattern: model` (section 10.2) frame $k$ is
+$\hat x_{\mathrm{adj}} + \frac{s_k}{n_f}\,(A_k^H W_k d_k - T_k \hat x)$, where
+$\hat x_{\mathrm{adj}} = T_{\mathrm{all}}\hat x / (n_{\mathrm{rep}} n_f)$ is the adjoint all-spoke image of the
+model estimate $\hat x$, $T_k = A_k^H W_k A_k$ the normal operator of the frame's spokes, $T_{\mathrm{all}}$
+that of all spokes, $n_f$ the NUFFT normalisation and $s_k$ the frame scale. The static part is therefore
+$\hat x$ blurred by the density-weighted adjoint.
+
+With `frame_static: cg` the static part is $\hat x$ itself, the CG solution of
+$(T_{\mathrm{all}} + \lambda I)\,\hat x = A^H W d$ run for `frame_static_iter` iterations (default 10) with
+the absolute Tikhonov weight `frame_static_lambda` (default 0), by the solver of section 10.3:
+
+$$ y_k = \hat x + g_k\,\big(A_k^H W_k d_k - T_k \hat x\big) = \hat x + g_k\,A_k^H W_k\,(d_k - A_k \hat x). $$
+
+**The scale $g_k$.** The residual term $A_k^H W_k (d_k - A_k\hat x)$ is an adjoint image, the units of
+$T\hat x$, not of $\hat x$. The adjoint image of the whole scan at the frame gain is
+$T_{\mathrm{all}}\hat x/(n_{\mathrm{rep}} n_f) = c\,\hat x$ with the gain
+
+$$ c = \frac{\mathrm{Re}\,\langle \hat x,\, T_{\mathrm{all}}\hat x\rangle}{n_{\mathrm{rep}}\, n_f\,\langle \hat x,\hat x\rangle}
+   \quad(\text{all channels together}), $$
+
+the Rayleigh quotient of the normal operator at $\hat x$ (normal-operator gain of all spokes). A frame holding
+the fraction $n_k/N$ of the spokes has the normal-operator gain of all spokes times $n_k/N$; the frame scale
+$s_k$ already undoes that fraction, so $s_k/n_f$ turns the frame's adjoint image into the units of the
+all-spoke adjoint image, and dividing by $c$ turns those into the units of $\hat x$:
+$g_k = s_k/(n_f\,c)$. With $c = 1$ this is the residual weight of the adjoint frames.
+
+**What changes and what does not.** A static object gives every frame $\hat x$ plus the residual of the CG
+solve (exactly $\hat x$ when the data equal $A\hat x$): the static part is the deblurred estimate, not its
+adjoint. The dynamic part is untouched: it is the frame's own undersampled information, weighted by
+$g_k$, so the dynamic resolution and the aliasing of a time change are still those of one frame. Frames of
+zero scale stay zero, and the magnitude is taken at the end as for every frame.
+
+**Record, key, cost.** The log line and the recon cache `.json` (`frame_static`) give the iterations asked and
+run, $\lambda$ and the final relative residual (worst channel). The key gets `{"static", "n_iter", "lambda"}`
+only when `frame_static` is not `adjoint`. The size estimate adds five volumes per channel (the CG work
+volumes, as `anat_cg` in section 10.3). With `estimate_k0` the predicted centre samples of every repetition
+join the CG solve and every frame's normal operator, as in section 10.3.
+
 ## 11. Output scaling (`hook.convert`)
 
 Converted NIfTI files are stored as unsigned 16-bit integers with a linear scaling in the header. For each
@@ -731,6 +771,9 @@ directions come from the method parameter `TrajectoryMode` (`Default`, `GoldenSa
 | `anat_solver` | `adjoint` | `adjoint` or `cg`. `cg` reconstructs the image of `frame_spokes: all` by conjugate gradients on the normal equations of all spokes instead of the adjoint (section 10.3). Needs `frame_spokes: all`; refused with `peri_event`, `frame_step`, `frame_accumulate`, `rep_pattern`, `subtract_rep_mean`. Keyed only when not `adjoint`. |
 | `anat_cg_iter` | `10` | CG iterations of `anat_solver: cg` (a positive integer; refused with the adjoint). |
 | `anat_lambda` | `0.0` | Tikhonov weight of `anat_solver: cg`, at least 0, absolute (its useful scale depends on the data gain). Refused with the adjoint. |
+| `frame_static` | `adjoint` | `adjoint` or `cg`. With `cg` the static part of the `rep_pattern: model` frames is $\hat x$ itself (CG) instead of its adjoint image, and the residual term is scaled to the units of $\hat x$ (section 10.4). Needs `rep_pattern: model`; refused with `anat_solver: cg`. Keyed only when not `adjoint`. |
+| `frame_static_iter` | `10` | CG iterations of `frame_static: cg` (a positive integer; refused with the adjoint). |
+| `frame_static_lambda` | `0.0` | Tikhonov weight of `frame_static: cg`, at least 0, absolute. Refused with the adjoint. |
 
 Read-time options (they choose what is returned from the cache and are not part of its key):
 

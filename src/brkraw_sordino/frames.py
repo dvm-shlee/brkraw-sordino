@@ -145,9 +145,8 @@ def parse_anat_solver(value: Any) -> str:
     raise ValueError(f"sordino: anat_solver must be 'adjoint' or 'cg', got {value!r}")
 
 
-def parse_anat_cg_iter(value: Any) -> int:
-    """A positive iteration count; None is the default (ValueError otherwise)."""
-    msg = f"sordino: anat_cg_iter must be a positive iteration count, got {value!r}"
+def _parse_iter(value: Any, name: str) -> int:
+    msg = f"sordino: {name} must be a positive iteration count, got {value!r}"
     if value is None:
         return ANAT_ITER_DEFAULT
     if isinstance(value, (bool, np.bool_)):
@@ -161,9 +160,8 @@ def parse_anat_cg_iter(value: Any) -> int:
     return int(number)
 
 
-def parse_anat_lambda(value: Any) -> float:
-    """A finite Tikhonov weight of at least 0; None is 0 (ValueError otherwise)."""
-    msg = f"sordino: anat_lambda must be a number of at least 0, got {value!r}"
+def _parse_lambda(value: Any, name: str) -> float:
+    msg = f"sordino: {name} must be a number of at least 0, got {value!r}"
     if value is None:
         return 0.0
     if isinstance(value, (bool, np.bool_)):
@@ -175,6 +173,58 @@ def parse_anat_lambda(value: Any) -> float:
     if not np.isfinite(number) or number < 0:
         raise ValueError(msg)
     return number
+
+
+def parse_anat_cg_iter(value: Any) -> int:
+    """A positive iteration count; None is the default (ValueError otherwise)."""
+    return _parse_iter(value, "anat_cg_iter")
+
+
+def parse_anat_lambda(value: Any) -> float:
+    """A finite Tikhonov weight of at least 0; None is 0 (ValueError otherwise)."""
+    return _parse_lambda(value, "anat_lambda")
+
+
+FRAME_STATICS = ("adjoint", "cg")
+
+
+def parse_frame_static(value: Any) -> str:
+    """``adjoint`` (also None) or ``cg`` (ValueError otherwise)."""
+    text = "adjoint" if value is None else (value.strip().lower() if isinstance(value, str) else None)
+    if text in FRAME_STATICS:
+        return text
+    raise ValueError(f"sordino: frame_static must be 'adjoint' or 'cg', got {value!r}")
+
+
+def parse_frame_static_iter(value: Any) -> int:
+    """A positive iteration count; None is the default (ValueError otherwise)."""
+    return _parse_iter(value, "frame_static_iter")
+
+
+def parse_frame_static_lambda(value: Any) -> float:
+    """A finite Tikhonov weight of at least 0; None is 0 (ValueError otherwise)."""
+    return _parse_lambda(value, "frame_static_lambda")
+
+
+def frame_static_key(options) -> Dict[str, Any]:
+    """Cache-key entry of ``frame_static='cg'`` (used only when it is not ``adjoint``)."""
+    return {"static": options.frame_static, "n_iter": int(options.frame_static_iter),
+            "lambda": float(options.frame_static_lambda)}
+
+
+def _check_static(options) -> None:
+    """Option guards of ``frame_static`` (ValueError): cg needs ``rep_pattern='model'``."""
+    if getattr(options, "frame_static", "adjoint") == "adjoint":
+        if (getattr(options, "frame_static_iter", ANAT_ITER_DEFAULT) != ANAT_ITER_DEFAULT
+                or getattr(options, "frame_static_lambda", 0.0) != 0.0):
+            raise ValueError("sordino: frame_static_iter and frame_static_lambda need frame_static='cg'; "
+                             "with the adjoint they would be ignored.")
+        return
+    if getattr(options, "rep_pattern", "none") != "model":
+        raise ValueError("sordino: frame_static='cg' needs rep_pattern='model' (the static image is the "
+                         "model estimate x_hat); without it the option would be ignored.")
+    if getattr(options, "anat_solver", "adjoint") != "adjoint":
+        raise ValueError("sordino: frame_static='cg' cannot be used with anat_solver='cg'.")
 
 
 def anat_key(options) -> Dict[str, Any]:
@@ -327,6 +377,7 @@ def make_plan(recon_info: Dict[str, Any], options) -> Optional[FramePlan]:
     from .recon import get_num_frames
 
     _check_anat(options)
+    _check_static(options)
     peri_on = getattr(options, "peri_event", None) not in (None, False, "")
     if getattr(options, "peri_censor", None) and not peri_on:
         raise ValueError("sordino: peri_censor needs peri_event (a peri-event frame plan, for example "
@@ -465,7 +516,7 @@ class _Stream:
 
 
 def _anat_image(options, kernel, xs, full, preds, virtual_traj, w_virtual, adj, plan, npro, chunk_spokes,
-                nf, anat_out):
+                nf, anat_out, n_it=None, lam=None, name="anat_solver"):
     """The ``anat_solver='cg'`` image, one volume per channel (complex128), at the gain of the adjoint image.
 
     Solves (N + lambda' I) x = A^H W d on the normal operator N of all spokes read (the measured samples
@@ -476,8 +527,8 @@ def _anat_image(options, kernel, xs, full, preds, virtual_traj, w_virtual, adj, 
     """
     from . import serial
 
-    lam = float(options.anat_lambda)
-    n_it = int(options.anat_cg_iter)
+    lam = float(options.anat_lambda if lam is None else lam)
+    n_it = int(options.anat_cg_iter if n_it is None else n_it)
     n_rx = len(xs)
     hist = []
     if virtual_traj is not None:
@@ -510,9 +561,9 @@ def _anat_image(options, kernel, xs, full, preds, virtual_traj, w_virtual, adj, 
     iterations = max(len(h) - 1 for h in hist)
     if anat_out is not None:
         anat_out.update({"solver": "cg", "n_iter": n_it, "iterations_run": int(iterations),
-                         "lambda": float(options.anat_lambda), "relative_residual": float(residual)})
-    logger.info("anat_solver='cg': %s iteration(s) of %s, lambda %g, final relative residual %.3g.",
-                iterations, n_it, float(options.anat_lambda), residual)
+                         "lambda": lam, "relative_residual": float(residual)})
+    logger.info("%s='cg': %s iteration(s) of %s, lambda %g, final relative residual %.3g.",
+                name, iterations, n_it, lam, residual)
     return np.stack(xs)
 
 
@@ -532,7 +583,7 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
     zeroed before the adjoint); frame scales are unchanged. Not with ``virtual_traj``
     (the K0 solve would still hold the excluded spokes): WI-0118 decides that case.
 
-    ``anat_out`` (a dict): with ``anat_solver='cg'`` (one frame of every spoke) it gets the solver, the
+    ``anat_out`` (a dict): with ``anat_solver='cg'`` (one frame of every spoke) or ``frame_static='cg'`` it gets the solver, the
     iterations, lambda and the final relative residual (``_anat_image``).
 
     ``out_scale`` and a ``traj`` with ``n_keep`` (``recon_matrix``, WI-0132): as in ``recon_dataobj``.
@@ -567,7 +618,11 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
     anat = getattr(options, "anat_solver", "adjoint") == "cg"
     if anat and spoke_mask is not None:
         raise ValueError("sordino: anat_solver='cg' with a spoke mask is not supported")
+    static_cg = getattr(options, "frame_static", "adjoint") == "cg"
+    if static_cg and mode != "model":
+        raise ValueError("sordino: frame_static='cg' needs rep_pattern='model'")
     need_x = virtual_traj is not None or mode == "model" or anat   # a CG solve on the all-spoke normal operator
+    gain = 1.0          # frame_static='cg': residual term to the units of x_hat (1 / c, technical note 10.4)
     img_fobj.seek(0)
     fid_shape, fid_dtype = parse_fid_info(recon_info)
     vol = [int(v) for v in parse_volume_shape(recon_info, options)]
@@ -730,7 +785,7 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
         if need_x:
             preds, k0, xs = [], [], []
             for ch in range(n_rx):
-                if anat and virtual_traj is None:
+                if (anat or static_cg) and virtual_traj is None:
                     xs.append(None)               # solved once, with lambda, in _anat_image
                     continue
                 x, _ = serial.conjugate_gradient(kernel.normal, full[ch], n_iter)
@@ -751,10 +806,21 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
                 if k0_out is not None and virtual_traj is not None:
                     k0_out.append(k0)
                 return np.dtype(np.complex128)
+            if static_cg:
+                # x_hat of the frames: CG with frame_static_iter and frame_static_lambda
+                _anat_image(options, kernel, xs, full, preds, virtual_traj, w_virtual, adj, plan, npro,
+                            chunk_spokes, nf, anat_out, n_it=int(options.frame_static_iter),
+                            lam=float(options.frame_static_lambda), name="frame_static")
             if mode == "model":
                 # the all-spoke image of the model: the same operator that the frames use
                 full = np.stack([kernel.normal(x) for x in xs])
                 xs = np.stack(xs)
+                if static_cg:
+                    # gain c of T_all / (n_rep nf) on x_hat (Rayleigh quotient over all channels);
+                    # the residual term of a frame is divided by it (technical note, section 10.4)
+                    den = float(np.vdot(xs, xs).real)
+                    c = float(np.vdot(xs, full).real) / (plan.n_rep * nf * den) if den > 0 else 1.0
+                    gain = 1.0 / c if c > 0 else 1.0
             else:
                 xs = None
             del kernel
@@ -766,14 +832,18 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
         if mode != "none":
             # x_full: the all-spoke image at the frame gain (the time mean of the frames), with the
             # predicted centre samples of every repetition; one image per channel
-            x_full = full
-            if preds is not None:
-                for a, b in serial.spoke_ranges(npro, chunk_spokes):
-                    adj.setpts(virtual_traj[a:b])
-                    wv = w_virtual[a:b].reshape(-1)
-                    for ch in range(n_rx):
-                        adj.add(x_full[ch], plan.n_rep * preds[ch][a:b].reshape(-1) * wv)
-            x_full /= plan.n_rep * nf
+            if static_cg:
+                x_full = xs            # frame_static='cg': the static image is x_hat itself
+                del full
+            else:
+                x_full = full
+                if preds is not None:
+                    for a, b in serial.spoke_ranges(npro, chunk_spokes):
+                        adj.setpts(virtual_traj[a:b])
+                        wv = w_virtual[a:b].reshape(-1)
+                        for ch in range(n_rx):
+                            adj.add(x_full[ch], plan.n_rep * preds[ch][a:b].reshape(-1) * wv)
+                x_full /= plan.n_rep * nf
         else:
             del full
     # residual frames (subtract_rep_mean, measured) carry no predicted centre term: the centre samples
@@ -811,7 +881,7 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
                     if virtual_traj is not None:
                         t += serial.normal_on(xs, virtual_traj[a:b], w_virtual[a:b])
                 g = r * npro + hi
-        t *= -scale / nf
+        t *= -scale * gain / nf
         t += x_full
         return t
 
@@ -827,7 +897,7 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
         for (lo, hi), bin_index in zip(plan.ranges, plan.groups):
             add_range(accs[bin_index], lo, hi, frame_preds)
         for bin_index in range(n_out):
-            img = accs[bin_index] * (plan.scales[bin_index] / nf)
+            img = accs[bin_index] * (plan.scales[bin_index] * gain / nf)
             term = pattern_term(bin_index)
             if term is not None:
                 img += term
@@ -857,7 +927,7 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
     for i, b in enumerate(points):
         while nxt < plan.n_frames and plan.ranges[nxt][1] == b:
             lo = plan.ranges[nxt][0]
-            img = (run - snaps[lo]) * (plan.scales[nxt] / nf)
+            img = (run - snaps[lo]) * (plan.scales[nxt] * gain / nf)
             term = pattern_term(nxt)
             if term is not None:
                 img += term
@@ -882,4 +952,4 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
 
 
 __all__ = ["FRAME_KEYS", "REP_PATTERNS", "FramePlan", "parse_frame_spokes", "parse_frame_step",
-           "parse_rep_pattern", "rep_pattern_key", "is_frame_mode", "make_plan", "recon_frames"]
+           "parse_rep_pattern", "rep_pattern_key", "parse_frame_static", "frame_static_key", "is_frame_mode", "make_plan", "recon_frames"]

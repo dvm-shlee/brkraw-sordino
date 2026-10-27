@@ -21,6 +21,12 @@ on top of it). Details and equations: `docs/technical-note.md`, section 10.1.
   predicted centre samples as the frames) instead of the adjoint. One 3D image per channel, same affine; the
   log and the cache `.json` record the solver, iterations, lambda and the final relative residual. Keyed only
   when not `adjoint`. Equations: `docs/technical-note.md`, section 10.3.
+- `frame_static` (`adjoint`, `cg`; default `adjoint`), `frame_static_iter` (default 10) and `frame_static_lambda`
+  (default 0): with `rep_pattern: model` and `cg` every frame is `x_hat + g_k A_k^H W_k (d_k - A_k x_hat)`, the
+  CG estimate of all spokes plus the frame's own residual, instead of the blurred adjoint image of `x_hat`.
+  A static object gives every frame `x_hat`; the dynamic resolution is still the frame's. Needs
+  `rep_pattern: model`. The cache `.json` records the iterations, lambda and the final residual; keyed only
+  when not `adjoint`. Default frames are unchanged. Equations: `docs/technical-note.md`, section 10.4.
 - Dependency pin `finufft<2.5` (`pyproject.toml:19`); the suite is run with finufft 2.4.1.
 
 Behaviour changes in the peri-event stage:
