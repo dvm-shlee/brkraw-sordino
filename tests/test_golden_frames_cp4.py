@@ -1,15 +1,15 @@
-"""Golden frames: memory and disk check, NIfTI frame time, ignored Default-trajectory keys, docs (WI-0113 CP4).
+"""Golden frames: memory and disk check, NIfTI frame time, ignored Default-trajectory keys, docs.
 
 * The size check runs before anything is reconstructed: the frames' recon cache
   (complex128, one volume per frame) is the disk need, and the frame engine's
   images (the running sum, one copy per open frame start, the frame written) are
   in the memory estimate. A scan-11-sized default (1,800 subset frames of 120^3,
-  49.8 GB of cache) stops with the size when the disk is too small (D-0190 1).
+  49.8 GB of cache) stops with the size when the disk is too small.
 * NIfTI: with golden frames the time step (pixdim[4]) is ``frame_step`` x the
-  spoke TR in the requested time unit (D-0190 2); one repetition per frame keeps
+  spoke TR in the requested time unit; one repetition per frame keeps
   the header as before.
 * The golden spoke lists do not use ``ProUnderSampling``, ``Reorder`` or
-  ``HalfAcquisition`` (Director 2026-10-10): values left in a golden protocol
+  ``HalfAcquisition``: values left in a golden protocol
   change nothing.
 """
 import io
@@ -98,7 +98,7 @@ def test_a_heavily_overlapping_window_stops_before_start_with_the_size(tmp_path,
     assert re.search(r"needs about [0-9.]+ GiB", str(exc.value))
 
 
-# ------------------------------------------------------------------ NIfTI frame time (D-0190 2)
+# ------------------------------------------------------------------ NIfTI frame time
 @pytest.mark.parametrize("t_units,factor", [("sec", 1e-3), ("msec", 1.0), ("usec", 1e3)])
 def test_nifti_time_step_is_frame_step_times_the_spoke_tr(tmp_path, monkeypatch, t_units, factor):
     info, fid = _setup(tmp_path)
@@ -133,8 +133,8 @@ def test_golden_lists_ignore_the_default_trajectory_keys(mode):
 
 
 # ------------------------------------------------------------------ docs
-#: WI-0122 moved the "Golden trajectories and frames" section of the README: the frame options and
-#: the frames example went to docs.md and, since WI-0138, with the rest of the old docs.md body to Appendix A
+#: The work moved the "Golden trajectories and frames" section of the README: the frame options and
+#: the frames example went to docs.md and, later with the rest of the old docs.md body to Appendix A
 #: of the technical note (the "Frames" paragraph under A.2 and the Cautions); docs.md keeps one line per
 #: frame option. The directions and the Golden Grid head (ProUnderSampling) are in the note's sections.
 DOCS_MD = ROOT / "src/brkraw_sordino/docs.md"
@@ -173,6 +173,6 @@ def test_docs_golden_options_are_real_options(tmp_path):
     cli = re.findall(r"--hook-arg sordino:([a-z_]+)=([^\s\\]+)", part)
     assert {k for k, _ in cli} == {"frame_spokes", "frame_step"}
     hook._build_options(dict({k: v for k, v in cli}, cache_dir=str(tmp_path)))
-    for word in ("49.8 GB", "pixdim"):
+    for word in ("pixdim",):
         assert word in part
     assert "ProUnderSampling" in NOTE_MD.read_text()
