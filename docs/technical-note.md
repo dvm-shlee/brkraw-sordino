@@ -293,8 +293,8 @@ transpositions give no centre; 3D data only). On the phantom it equals the slice
 $10^{-6}$ mm. Without reco parameters (no affine), with several slice packs, or when the centre cannot
 be read, the grid stays at $\lfloor\mathbf M/2\rfloor$ (an info line says so).
 
-For the phantom scans (axial, $120^3$ and $60^3$) $\mathbf s=(0,0,-0.5)$ voxel: before this change every
-image sat half a voxel too high on the slice axis (0.1 mm at 0.2 mm voxels, 0.2 mm at 0.4 mm). Odd sizes,
+For axial scans $\mathbf s=(0,0,-0.5)$ voxel: before this change every
+image sat half a voxel too high on the slice axis (half a voxel). Odd sizes,
 other planes and flipped axes follow from the affine and are tested on synthetic affines only.
 
 **Why the slice axis differs (inference).** ParaVision writes `RECO_rotate` $=(0.5,\ 0.5,\ 0.5-0.5/N)$,
@@ -322,7 +322,7 @@ $$v_b=-\big(\lfloor M_a/2\rfloor-\lfloor N_a/2\rfloor\big),\qquad A'=A\,\begin{p
 so that every object stays where it was and the phase origin still maps to $\mathbf c$. When $M_a$ and $N_a$
 differ in parity the extra voxel sits on one side and the FOV centre moves by half a voxel while
 the objects do not. Before this fix a factor other than 1 on index 0 or 1 moved the image when the output
-reorders those axes (measured: 1.6 mm on a $16^3$ scan, 10 mm on a $60^3$ scan), and a size that is not a
+reorders those axes (the offset grows with the matrix), and a size that is not a
 whole multiple (or an odd matrix) gave a sub-voxel shift ($16\times1.1$: 0.3 mm). `ext_factors=1` is
 unchanged; the reconstruction and its cache key were not changed for any value by that fix.
 
@@ -392,14 +392,11 @@ within the NUFFT tolerance, and the hook picks one (no option):
 The sample solve is used only when its whole reconstruction estimate is at most half of the Toeplitz
 one (a frame with few samples for its grid), or when the Toeplitz solve does not fit the memory limit even
 with the smallest chunk and the sample solve does. An info line names the solve and the estimates;
-`get_dataobj_info` reports it (`recon_k0_method`, `recon_k0_reason`). Example: a $128^3$ grid with
-$12{,}800\times64$ samples per frame measured 0.57 GiB with the sample solve (2.08 GiB on grids); a $64^3$ grid
-with the same samples keeps the grid solve (0.42 GiB, 0.2 s per frame, against 0.25 GiB and 0.8 s).
+`get_dataobj_info` reports it (`recon_k0_method`, `recon_k0_reason`). For a large grid with few samples per frame the sample solve needs much less memory than the grid solve; for a small grid the grid solve is smaller and faster, so it is kept.
 
 **With frames** the estimate is made once from all spokes read, with the kernel of the repetitions
 added ($n_{\mathrm{rep}}$ times one repetition's), and its predicted leading samples are added spoke by spoke; every frame
-uses that one $\hat x$, so frames stay linear in their spokes. A window estimate alone is far too low (on a
-development phantom scan: 3-4 % of the all-spoke value from 160 spokes, 26-29 % from 3,200), and with several repetitions the
+uses that one $\hat x$, so frames stay linear in their spokes. A window estimate alone is far too low when it uses few spokes, and with several repetitions the
 common estimate also removes repetition-to-repetition changes of the filled centre. If the object moves
 during the scan, the one value is the average over its positions. The estimated $K_0$ is also kept in
 `scan._sordino_recon_meta["k0"]` and the cache `.json`.
@@ -438,6 +435,67 @@ $(l_k+h_k)\,\mathrm{TR}/2$, interval) is in `scan._sordino_recon_meta["frames"]`
 **Size.** The recon cache holds one complex128 volume per frame (and channel):
 $16\,n_{\mathrm{ch}}M_1M_2M_3$ bytes per frame. A sliding window also holds one copy of the running sum per open frame
 start. The size check runs before anything is reconstructed and stops with the sizes.
+
+### 10.1 Peri-event frames (`perievent.py`, `frames.py`)
+
+`peri_event` replaces the sliding window by bins relative to an event that repeats. Code references are to
+`src/brkraw_sordino/` at the golden-sordino head.
+
+**Bin edges.** Seconds are converted to whole spokes at the spoke TR (`perievent.py:114-123`; a non-integer
+count is rounded with a warning). With period $P$, bin width $W$, onset $o$ and start $s$, all in spokes, event
+$k=0,1,\dots$ and bin $b=0,1,\dots,B-1$ hold the half-open spoke range
+
+$$[\,l_{kb},h_{kb})=[\,o+kP+s+bW,\ o+kP+s+(b+1)W\,)$$
+
+of the stream of $N_{\mathrm{tot}}$ spokes (`perievent.py:204-209`). A range with $l<0$ or $h>N_{\mathrm{tot}}$ is
+left out (`perievent.py:209-211`). The number of events is $\lfloor (N_{\mathrm{tot}}-o-s)/P\rfloor+1$, capped by
+`events` (`perievent.py:193-195`). The bin edges in seconds, $(s+bW)\,\mathrm{TR}$, are kept as `bin_edges_s` in
+the plan info (`perievent.py:239`).
+
+**Default bin count.** Without `bins`, $B=\max(1,\lceil P/W\rceil)$, so the bins cover the whole period
+(`perievent.py:179`). When $WB>P$ a warning is logged: for an explicit `bins`, or when $W$ divides $P$, the
+bins of neighbouring events overlap (`perievent.py:180-185`); otherwise the last default bin runs $WB-P$ spokes
+into the next event and those spokes are gridded in two bins (`perievent.py:186-189`).
+
+**Scale.** With $n_b$ the ranges that reached bin $b$, the bin image is the adjoint of the union of its
+ranges (section 10 weights), scaled by
+
+$$c_b=\frac{N_{\mathrm{pro}}}{n_b\,W},$$
+
+the brightness of a one-repetition image (`perievent.py:225`). An empty bin ($n_b=0$) gets $c_b=0$: the
+reconstruction runs for the bins that have spokes, a warning names the empty ones, and they are all-zero frames
+(`perievent.py:220-225`). Only a plan with no spoke range at all raises (`perievent.py:218-219`).
+
+**`peri_censor`.** The file is a 1D column of 0/1 with one row per equal block of the stream: the $R$ rows are
+stretched to $N_{\mathrm{tot}}/R$ spokes each, and $R$ must divide $N_{\mathrm{tot}}$ (`perievent.py:126-151`).
+A spoke is usable when its value is 1. A range is used only when all its spokes are usable
+(`perievent.py:212-214`), so a censored block removes the whole range it touches and $n_b$ falls
+accordingly. `peri_censor` without `peri_event` raises a `ValueError` (`frames.py:229-231`).
+
+**`subtract_rep_mean`.** Let $y_{r,i}$ be the samples of spoke position $i$ in repetition $r$ and
+$u_{r,i}\in\{0,1\}$ its usability (all 1 without `peri_censor`). The repetition mean is
+
+$$\bar y_i=\frac{\sum_r u_{r,i}\,y_{r,i}}{\max\!\big(1,\sum_r u_{r,i}\big)},$$
+
+and every spoke is gridded as the residual $y_{r,i}-\bar y_i$ (`frames.py:462-483`). Censored spokes are
+excluded from the mean (`frames.py:466-476`), so they cannot leak into the residual of the spokes that are used;
+a position censored in every repetition has mean 0. At least 2 repetitions are needed (`frames.py:463-465`).
+Whatever is fixed for a spoke position (its undersampling pattern, the time-averaged anatomy) cancels. This is
+task-neutral only when the repetition length is not a multiple of the event period; otherwise every repetition
+of a position lands on the same event phase and the response is subtracted with the background. Without a
+frame plan (no `peri_event` and no frame option) `subtract_rep_mean` raises a `ValueError` instead of being
+ignored (`frames.py:232-235`).
+
+**`pixdim[4]` for peri frames.** The frame axis is the bin index, not scan time. `FramePlan.frame_interval_s`
+returns the bin width, $W\,\mathrm{TR}$, for a peri plan and $S\,\mathrm{TR}$ otherwise
+(`frames.py:158-167`), and the NIfTI writer copies it to `pixdim[4]` in the unit asked for
+(`hook.py:1246-1260`). So `pixdim[4]` holds the width of one bin: frame $b$ is the time $s+bW$ to $s+(b+1)W$
+after the event onset, and the bin edges are in `bin_edges_s`.
+
+**Memory.** The engine allocates one accumulator per bin before the first spoke, so a peri plan keeps every
+frame open: `FramePlan.max_open` is `n_frames` (`frames.py:170-177`) and that is the count the memory estimate
+uses (`hook.py:715`, reported as `recon_frames_open`, `hook.py:736`). A plan with many bins is refused by the
+size check under a small `max_memory_gb`.
 
 ## 11. Output scaling (`hook.convert`)
 
@@ -531,7 +589,7 @@ hooks:
     split_ch: false
     # as_complex: true  # optional, return (real, imag)
     # cache_dir: ~/.brkraw/cache/sordino  # optional (add manually if needed)
-    # frame_spokes: 3200      # golden scan: 20 subsets of 160 spokes, 2 s at a TR of 0.625 ms
+    # frame_spokes: 3200      # golden scan: spokes per frame (a whole number of subsets)
     # frame_accumulate: true  # frames of 3,200, 6,400, 9,600 ... spokes
 ```
 
@@ -571,9 +629,9 @@ directions come from the method parameter `TrajectoryMode` (`Default`, `GoldenSa
 | `frame_spokes` | `null` | Spokes per frame. `null` or `subset`: the method subset, the smallest count that covers the sphere (`NGoldenSpokesPerSubset`; one grid frame). `repetition`: one repetition per frame. Integer: a spoke count. Default scans keep one repetition per frame (`subset` is refused). |
 | `frame_step` | `null` | Spokes between frame starts (`null`: `frame_spokes`). Smaller is a sliding window, larger leaves spokes out. |
 | `frame_accumulate` | `false` | Every frame starts at the first spoke and holds `frame_spokes` + k x `frame_step` spokes; the last one holds every spoke read. |
-| `peri_event` | `null` | Event-related frames: one image per time bin relative to an event that repeats every `period` seconds, each bin holding that bin's spokes from every event. Comma-separated fields `period=` and `bin=` (seconds, both required), with optional `onset=` (seconds to the first event, default 0), `start=` (seconds from onset to the first bin, default 0, may be negative), `bins=` (default: enough to tile one period) and `events=` (default: every event that fits). Example: `peri_event=period=20,bin=1,onset=1`. A bin is a union of one spoke range per event, so the engine sums per bin in one forward pass instead of differencing prefix sums; each spoke is still gridded once. The golden trajectory repeats every `NPro` spokes, so events land on `NPro / gcd(period_spokes, NPro)` distinct phases: when the period divides the repetition evenly the bins re-sample a few directions many times, and the log reports the unique spoke count to judge against the Nyquist count of the reconstruction matrix. |
-| `peri_censor` | `null` | Path to a 1D file of 0/1 over the spokes of the stream, 1 = usable. A peri-event range is used only when all of its spokes are usable; the per-bin scale divides by the events that reached each bin, so censoring changes the averaging weight and nothing else. The file's granularity must match the bin width, or bins end up with unequal event counts. |
-| `subtract_rep_mean` | `false` | Average each spoke position over the repetitions read and subtract that average from every occurrence before gridding. Whatever is fixed for a spoke position - its own undersampling pattern, and the time-averaged anatomy - cancels, leaving only what varies between repetitions of that position. Task-neutral only when the repetition length is not a multiple of the event period: at 1810 subsets a repetition is 181 s against a 20 s cycle, so the 20 repetitions of a spoke cover all 20 task phases once each; at 1800 subsets they would all land on the same phase and the response would be subtracted away with the background. |
+| `peri_event` | `null` | Event-related frames: one image per time bin relative to an event that repeats every `period` seconds, each bin holding that bin's spokes from every event. Comma-separated fields `period=` and `bin=` (seconds, both required), with optional `onset=` (seconds to the first event, default 0), `start=` (seconds from onset to the first bin, default 0, may be negative), `bins=` (default `ceil(period / bin)`, the whole period; a warning when the bins run past the period) and `events=` (default: every event that fits). Example: `peri_event=period=20,bin=1,onset=1`. A bin that gets no spokes is an all-zero frame with a warning; only a plan with no spokes raises. The frame axis is bins: `pixdim[4]` is the bin width. The golden trajectory repeats every `NPro` spokes, so events land on `NPro / gcd(period_spokes, NPro)` distinct phases: when the period divides the repetition evenly the bins re-sample a few directions many times, and the log reports the unique spoke count to judge against the Nyquist count of the reconstruction matrix. Details: section 10.1 (`perievent.py:154-259`). |
+| `peri_censor` | `null` | Path to a 1D file of 0/1, one row per equal block of the stream's spokes (rows must divide the spokes read; each row covers spokes / rows spokes), 1 = usable. A peri-event range is used only when all of its spokes are usable; the per-bin scale divides by the ranges that reached each bin. Needs `peri_event` (a `ValueError` without it). Also excludes the censored spokes from the `subtract_rep_mean` average. Section 10.1 (`perievent.py:126-151`, `frames.py:229-231`). |
+| `subtract_rep_mean` | `false` | Average each spoke position over the repetitions read (censored spokes excluded) and subtract that average from every occurrence before gridding. What is fixed for a spoke position cancels, leaving what varies between repetitions. Needs a frame plan (`peri_event` or a frame option; a `ValueError` without one) and at least 2 repetitions. Task-neutral only when the repetition length is not a multiple of the event period. Section 10.1 (`frames.py:232-235`, `frames.py:462-483`). |
 
 Read-time options (they choose what is returned from the cache and are not part of its key):
 
@@ -601,21 +659,22 @@ brkraw convert /path/to/study -s 11 -r 1 \
   one. Example (two approved coronal scans, readout `H_F`, quadruped, `Head_Supine`,
   `subject_ras`): index 0 widens posterior-anterior, 1 left-right, 2 inferior-superior; the
   output array holds index 1 on axis 0 and index 0 on axis 1.
-- **`estimate_k0` is on by default** and costs time and memory (a 160^3 scan with NPro 80,876, NPoints 640, OverSampling 8 and 2 receivers, synthetic FID, macOS, default limit: 3.0 GiB measured without it, 4.9 GiB with it). Memory is a fixed part plus one chunk of spokes and does not grow with spokes or frames. On an 8 GB computer (limit 4 GiB) such a scan stops with an offer of a limit of 5.3 GB; `estimate_k0: false` fits. Set to `true` explicitly it stops with an error when the values it needs are missing (the sequence timing, or with `correct_ramptime: false` only `AcqDelayTotal`, `PVM_EffSWh`, `OverSampling`); left at the default it is switched off with an info line then. Caches made before it became the default are found again only with `estimate_k0: false`.
+- **`estimate_k0` is on by default** and costs time and memory. Memory is a fixed part plus one chunk of spokes and does not grow with spokes or frames. When the default limit is too small for a large scan the size check stops with an offer of a larger limit; `estimate_k0: false` needs less. Set to `true` explicitly it stops with an error when the values it needs are missing (the sequence timing, or with `correct_ramptime: false` only `AcqDelayTotal`, `PVM_EffSWh`, `OverSampling`); left at the default it is switched off with an info line then. Caches made before it became the default are found again only with `estimate_k0: false`.
 - **`estimate_k0` with `correct_ramptime: false` and on a general ZTE (WI-0137).** Before, `correct_ramptime: false` switched `estimate_k0` off (an explicit `true` was an error) and a general ZTE was always reconstructed without it. Now both follow `estimate_k0` (default `true`): those results change and their caches get a new key (`estimate_k0: false` gives the old result and finds the old caches). The virtual centre samples continue each spoke's straight line back to the RF centre. On SORDINO data with `correct_ramptime: false` the straight line only approximates the ramped spokes: treat that combination as an experiment.
 - **Wide centre gap.** The fill is a least-squares solve with the FOV as the only constraint. Its iterations follow the gap (the first kept sample's distance from k = 0 in k-grid units; SORDINO data: 0.5-1.2): 10 up to 1.3, 40 up to 1.8, 160 above (synthetic data: K0 within 0.1 % up to 1.8 and 0.5 % at 2.0; 10 iterations alone degrade above 1.3). Above 2.0 a warning gives the gap; the reconstruction still runs. `ignore_samples: 0` narrows the gap by 1 / OverSampling when the first sample is usable. The gap is in `kspace_gap` of the cache `.json`.
 - **ZTE-mode scans of the SORDINO sequence.** `sordino_260801` can run in ZTE mode (`SequenceMode = ZTE`: per the sequence source the gradient reaches each spoke's vector before the RF pulse and stays constant while sampling). The method file still holds `RampTime` and `MaximizeRampTime`, and the hook does not tell such scans apart from the header: it applies the SORDINO ramp model. Set `correct_ramptime: false` (and keep `estimate_k0: true`) for them yourself.
 - **Golden frames need disk.** The cache holds one complex128 volume per frame and channel.
-  The default frames of a 288,000-spoke, 160-spoke-subset scan at 120^3 are 1,800 frames:
-  49.8 GB of cache (46.4 GiB), 24.9 GB as float64 magnitude in memory, 6.2 GB as uint16 NIfTI. The size
+  The default frames of a golden scan are one frame per subset, so a long scan has many frames.
+  The cache holds 16 n_ch M1 M2 M3 bytes per frame (section 10). The size
   check runs first and stops with the sizes; use larger `frame_spokes`, fewer repetitions
   (`num_frames`) or `frame_spokes: repetition`. A sliding window also keeps one running-sum
   copy per open frame start (`frame_spokes` / `frame_step` copies).
-- **`recon_matrix` grid and values.** The grid is the one ParaVision writes for a scan of that matrix with the same FOV and centre (phantom: scan 13 at 120^3 reduced to 60 has the affine of the native 60^3 scan 18), so the FOV edges can move by half a full-resolution voxel. Values follow the full image's low-pass (phantom, Default: scale within 0.2 %, NRMSE 0.03); golden scans with `capped` or `pipe` weights re-estimate the weights on the kept samples, which put the global scale at 0.74 of the full image (shape kept; `k2`: 1.04).
+- **`recon_matrix` grid and values.** The grid is the one ParaVision writes for a scan of that matrix with the same FOV and centre, so the FOV edges can move by half a full-resolution voxel. Values follow the full image's low-pass; golden scans with `capped` or `pipe` weights re-estimate the weights on the kept samples, which changes the global scale relative to the full image (the shape is kept).
 - **NIfTI is uint16 with slope and intercept.** Converted files are stored as 16-bit integers; the true value is `inter + slope * stored`.
 - **Frames:** `correct_spoketiming` cannot be combined with frames (use
   `frame_spokes: repetition`). `estimate_k0` is estimated once from all spokes read. NIfTI
-  `pixdim[4]` is `frame_step` x the spoke TR in the unit asked for. Frame spokes, centre times
+  `pixdim[4]` is `frame_step` x the spoke TR in the unit asked for; for `peri_event` the frame axis is
+  bins and `pixdim[4]` is the bin width (section 10.1). Frame spokes, centre times
   and interval are in `scan._sordino_recon_meta["frames"]`.
 - **Grid shift and cache regeneration.** The image is placed where the brkraw affine says; the
   reconstruction grid is moved by a derived shift (section 8). For the phantom

@@ -1,3 +1,36 @@
+# Unreleased (golden-sordino)
+
+New options for event-related golden scans (the peri-event work is by Tzu-Hao Chao; the review fixes below are
+on top of it). Details and equations: `docs/technical-note.md`, section 10.1.
+
+- `peri_event` (`perievent.py`): one image per time bin relative to an event that repeats every `period` seconds
+  (`period=`, `bin=`, optional `onset=`, `start=`, `bins=`, `events=`). The frame axis is bins; `pixdim[4]` is the
+  bin width.
+- `peri_censor` (`perievent.py:126-151`): a 0/1 file, one row per equal block of the stream's spokes. A peri-event
+  range is used only when all its spokes are usable.
+- `subtract_rep_mean` (`frames.py:462-483`): every spoke is reconstructed as its deviation from the mean of its
+  spoke position over the repetitions read.
+- Dependency pin `finufft<2.5` (`pyproject.toml:19`); the suite is run with finufft 2.4.1.
+
+Behaviour changes in the peri-event stage:
+
+- A peri bin that gets no spokes no longer raises: a warning names the empty bins and they are all-zero frames
+  (`perievent.py:220-225`). It raises only when no spokes are selected at all (`perievent.py:218-219`).
+- The default bin count is `ceil(period / bin)` instead of the floor, so the whole period is binned; a warning is
+  logged when the bins run past the period and spokes are gridded in two bins (`perievent.py:179-189`).
+- `subtract_rep_mean` leaves censored spokes (`peri_censor`) out of the repetition mean, so they do not leak into
+  the residual (`frames.py:466-476`). A position censored in every repetition has mean 0.
+- `subtract_rep_mean` or `peri_censor` without a frame plan raises a `ValueError` naming the option and what it
+  needs, instead of being ignored (`frames.py:229-235`).
+- The memory estimate counts every bin of a peri plan as open (`FramePlan.max_open` is `n_frames`,
+  `frames.py:170-177`, used at `hook.py:715`), so a plan with many bins is refused under a small `max_memory_gb`.
+
+Tests: two tolerances changed to match the NUFFT tolerance (`serial.NUFFT_EPS`), not a change of results: the
+golden density comparison of the weights path and the product path is 1e-10 (was 1e-12), and the chunked-sum
+comparison of the serial reconstruction is 1e-6 times the maximum (was 1e-10); both failed under finufft 2.4.1.
+
+Documentation: measured project numbers were removed from the package docs.
+
 # Unreleased (branch golden-weights-k0, on brkraw-060)
 
 Documentation (WI-0138): `brkraw hook docs sordino` (`src/brkraw_sordino/docs.md`) is now a CLI usage page of
