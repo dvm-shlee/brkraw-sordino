@@ -523,10 +523,12 @@ for equal frame scales. It is computed from the raw data, not from residuals (`f
 `SampleNormal` (`frames.py:597-613`). For every written frame, on that frame's own ranges (the union of ranges
 of a peri-event bin), kept samples, weights and centre samples,
 
-$$z_{kr}=y_{kr}-P_k,\qquad P_k=\tfrac{s_k}{n_f}\,T_k\hat x-x_{\mathrm{full}},$$
+$$z_{kr}=y_{kr}-P_k,\qquad P_k=\tfrac{s_k}{n_f}\,T_k\hat x-T_{\mathrm{all}}\hat x,$$
 
 where $T_k\hat x$ is a type-2 NUFFT, the weights and a type-1 NUFFT (`serial.normal_on`, `serial.py:229-253`;
-`frames.py:644-668`). The predicted centre samples of the frame come from the same CG solution that fills the
+`frames.py:644-668`) and $T_{\mathrm{all}}\hat x$ is the all-spoke image of the same operator applied to $\hat x$,
+scaled as a frame (`kernel.normal(x_hat)`). The raw-data $x_{\mathrm{full}}$ belongs only to the `measured`
+formula: with the model baseline a static object leaves every frame equal to the all-spoke image. The predicted centre samples of the frame come from the same CG solution that fills the
 centre (`frames.py:600-606`). No data of other repetitions enter the pattern, so it works with one repetition
 and adds only the noise of $\hat x$ (all $R\,N_{\mathrm{pro}}$ spokes). Nothing is cached per position; the
 operator is applied again for every frame. What remains is $(T_k^{\mathrm{true}}-T_k^{\mathrm{model}})\hat x$:
