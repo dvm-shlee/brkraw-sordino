@@ -45,6 +45,12 @@ class Options:
     # "none", "model" (forward model of the frame's own spokes) or "measured" (repetition mean).
     # Keyed only when not "none" (hook._build_cache_params).
     rep_pattern: str = "none"
+    # Anatomical reference of a whole scan as one image (frames.py, frame_spokes="all"): "adjoint"
+    # or "cg" (conjugate gradients on the normal operator of all spokes), with its iteration count
+    # and Tikhonov weight. Keyed only when the solver is not "adjoint" (hook._build_cache_params).
+    anat_solver: str = "adjoint"
+    anat_cg_iter: int = 10
+    anat_lambda: float = 0.0
 
 
 __all__ = [

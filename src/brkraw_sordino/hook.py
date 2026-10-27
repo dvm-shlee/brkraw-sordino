@@ -145,6 +145,9 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         "recon_matrix",
         "subtract_rep_mean",
         "rep_pattern",
+        "anat_solver",
+        "anat_cg_iter",
+        "anat_lambda",
     } | set(READ_KEYS) | set(frames_mod.FRAME_KEYS)
     unknown_keys = sorted(set(kwargs.keys()) - known_keys)
     if unknown_keys:
@@ -186,6 +189,9 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         peri_censor=kwargs.get("peri_censor") or None,
         subtract_rep_mean=parse_bool("subtract_rep_mean", kwargs.get("subtract_rep_mean", False)),
         rep_pattern=frames_mod.parse_rep_pattern(kwargs.get("rep_pattern")),
+        anat_solver=frames_mod.parse_anat_solver(kwargs.get("anat_solver")),
+        anat_cg_iter=frames_mod.parse_anat_cg_iter(kwargs.get("anat_cg_iter")),
+        anat_lambda=frames_mod.parse_anat_lambda(kwargs.get("anat_lambda")),
     )
 
 
@@ -395,7 +401,8 @@ def _build_cache_params(
     # without frames (one repetition per frame) is the key from before CP3
     keyed = {k: v for k, v in asdict(options).items()
              if k not in RECON_KEY_EXCLUDED and k not in frames_mod.FRAME_KEYS
-             and k not in ("golden_weights", "recon_matrix", "subtract_rep_mean", "rep_pattern")}
+             and k not in ("golden_weights", "recon_matrix", "subtract_rep_mean", "rep_pattern",
+                          "anat_solver", "anat_cg_iter", "anat_lambda")}
     params = {
         "scan_id": getattr(scan, "scan_id", None),
         "reco_id": reco_id,
@@ -415,6 +422,9 @@ def _build_cache_params(
         if getattr(options, "rep_pattern", "none") != "none":
             # the images differ; the solve behind them is part of the key
             params["rep_pattern"] = frames_mod.rep_pattern_key(options, recon_info)
+    if getattr(options, "anat_solver", "adjoint") != "adjoint":
+        # a different image (the solve and its iterations); the default key is unchanged
+        params["anat"] = frames_mod.anat_key(options)
     if dcf.is_golden(recon_info):
         # golden trajectories: the density-weight rule of the golden_weights choice (WI-0113 runs 5
         # and 6; the default "capped" is the run-5 key); Default keys unchanged
@@ -704,7 +714,8 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
         budget = int(limit["limit_nbytes"]) - read_nbytes - dcf_share
         plan = memguard.recon_plan(
             int(recon_info["NPro"]), int(recon_info["NPoints"]), n_ch, vol,
-            estimate_k0=bool(options.estimate_k0) or getattr(options, "rep_pattern", "none") == "model",
+            estimate_k0=(bool(options.estimate_k0) or getattr(options, "rep_pattern", "none") == "model"
+                         or getattr(options, "anat_solver", "adjoint") == "cg"),
             budget_nbytes=budget)
         recon_share = max(plan["recon_nbytes"], int(stc_stage_nbytes))
         chunk_spokes = plan["chunk_spokes"]
@@ -720,7 +731,8 @@ def _output_info(recon_info: Dict[str, Any], options: Options, cached_shape, cac
             recon_share += memguard.frames_nbytes(
                 frame_plan.max_open, n_ch, vol, estimate_k0=bool(options.estimate_k0),
                 n_pro=int(recon_info["NPro"]), n_virtual=n_virtual,
-                rep_pattern=getattr(options, "rep_pattern", "none") != "none")
+                rep_pattern=getattr(options, "rep_pattern", "none") != "none",
+                anat_cg=getattr(options, "anat_solver", "adjoint") == "cg")
         recon_share += dcf_share
     info: Dict[str, Any] = {
         "shape": shape,
@@ -925,6 +937,8 @@ def get_dataobj(
     recon_meta["frames"] = None if frame_plan is None else frame_plan.describe()
     if frame_plan is not None and options.estimate_k0:
         recon_meta["frames"]["k0_scope"] = "all spokes read"
+    recon_meta["anat"] = None if options.anat_solver == "adjoint" else {
+        "solver": options.anat_solver, "n_iter": options.anat_cg_iter, "lambda": options.anat_lambda}
     setattr(scan, "_sordino_recon_meta", recon_meta)
     setattr(scan, "_sordino_dataobj_info", info)
     memguard.check(info)
@@ -936,6 +950,8 @@ def get_dataobj(
     cached_shape: Optional[list[int]] = plan["cached_shape"]
     if cached_dtype is not None and options.estimate_k0 and plan["img_meta"]:
         recon_meta["k0"] = plan["img_meta"].get("k0")
+    if cached_dtype is not None and recon_meta["anat"] and plan["img_meta"] and plan["img_meta"].get("anat"):
+        recon_meta["anat"] = plan["img_meta"]["anat"]       # with the final residual
     if cached_dtype is not None and red is not None and plan["img_meta"] and plan["img_meta"].get("recon_matrix"):
         recon_meta["recon_matrix"] = plan["img_meta"]["recon_matrix"]     # with the cut details (WI-0132)
 
@@ -949,6 +965,7 @@ def get_dataobj(
             chunk_spokes = info.get("recon_chunk_spokes")
             virtual_traj = None
             k0_frames: list = []
+            anat_out: dict = {}
             if options.estimate_k0:
                 virtual_traj = _leading_points(recon_info, options)
                 _warn_centre_gap(recon_info, options)
@@ -1054,7 +1071,9 @@ def get_dataobj(
                         phase_factor=phase_factor, virtual_traj=virtual_traj, k0_out=k0_frames,
                         chunk_spokes=chunk_spokes, k0_method=info.get("recon_k0_method"),
                         weights=weights, out_scale=out_scale,
-                        subtract_rep_mean=options.subtract_rep_mean)
+                        subtract_rep_mean=options.subtract_rep_mean, anat_out=anat_out)
+                    if anat_out:
+                        recon_meta["anat"] = dict(recon_meta["anat"], **anat_out)
                 else:
                     logger.debug("Spoketiming correction disabled.")
                     dtype = recon_dataobj(fid_fobj, traj, recon_info, img_fobj, options,
@@ -1078,6 +1097,7 @@ def get_dataobj(
                 "k0": recon_meta["k0"],
                 "short_fid": recon_meta["short_fid"],
                 **({"recon_matrix": recon_meta["recon_matrix"]} if recon_meta.get("recon_matrix") else {}),
+                **({"anat": recon_meta["anat"]} if recon_meta.get("anat") else {}),
             },
         )
     else:

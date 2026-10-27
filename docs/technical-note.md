@@ -557,6 +557,41 @@ default keys are unchanged. The size estimate adds three volumes per channel (`m
 all-spoke image or $\hat x$, $x_{\mathrm{full}}$ and the pattern volume of the frame being written. `model`
 costs two extra NUFFTs per channel and frame.
 
+### 10.3 Anatomical reference from all spokes (`anat_solver`; `frames.py`)
+
+A functional scan holds many repetitions of the same spokes; all of them together sample k-space far more
+densely than one repetition. With `frame_spokes: all` the plan is one frame of $n_{\mathrm{rep}}\,N_{\mathrm{pro}}$
+spokes and the output is one 3D image per channel (channels combined as for any other frame: magnitude),
+with the same affine as every other image of the scan. By default that frame is the adjoint image
+$\hat x_{\mathrm{adj}} = A^H W d / n_f$.
+
+With `anat_solver: cg` the image is instead the least-squares estimate
+
+$$ x = \arg\min_x \; \lVert W^{1/2}(A x - d)\rVert_2^2 + \lambda'\,\lVert x\rVert_2^2
+   \quad\Longleftrightarrow\quad (A^H W A + \lambda' I)\,x = A^H W d, $$
+
+where $A$ is the NUFFT to every kept sample of every repetition (samples after `ignore_samples`, cut to
+`recon_matrix` when set), $W$ the density weights of the other images (`golden_weights`), and, with
+`estimate_k0`, $d$ also holds the predicted centre samples of every repetition (the centre estimate is the
+one the frames use, solved first from the measured samples; the predicted samples then join $A$, $W$ and
+$d$). The normal operator is the Toeplitz convolution (or the sample-based operator, as `estimate_k0`
+picks it) summed over the repetitions, so one CG iteration costs two FFTs per axis pair, not a NUFFT of
+every spoke. The solve starts from zero and runs `anat_cg_iter` iterations of the same CG as
+the centre solve; lambda is the absolute Tikhonov weight (no gain scaling; its useful scale
+depends on the data gain) and 0 is the plain weighted least squares.
+
+**Why it sharpens.** The adjoint with density weights is only the first CG step: it treats the weighted
+samples as if the trajectory were a perfect tiling, so the undersampling of the sphere and the overlap of
+neighbouring spokes leave blur and streaks. Further iterations of the normal equations deconvolve the
+point-spread function of the actual sampling, which is what removes them; the cost is noise amplification
+at the weakly sampled spatial frequencies, which `anat_lambda` limits.
+
+**Record and key.** The log line and the recon cache `.json` (`anat`) give the solver, the iterations asked
+and run, $\lambda$, and the final relative residual $\lVert r\rVert/\lVert b\rVert$ of the worst channel.
+The key gets `{"solver", "n_iter", "lambda"}` only when the solver is not `adjoint`, so default keys are
+unchanged. The size estimate adds five volumes per channel (x, r, p, the operator output and the right-hand
+side; `memguard.frames_nbytes`, `anat_cg`) and counts the K0 solve, which the CG uses.
+
 ## 11. Output scaling (`hook.convert`)
 
 Converted NIfTI files are stored as unsigned 16-bit integers with a linear scaling in the header. For each
@@ -686,13 +721,16 @@ directions come from the method parameter `TrajectoryMode` (`Default`, `GoldenSa
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `frame_spokes` | `null` | Spokes per frame. `null` or `subset`: the method subset, the smallest count that covers the sphere (`NGoldenSpokesPerSubset`; one grid frame). `repetition`: one repetition per frame. Integer: a spoke count. Default scans keep one repetition per frame (`subset` is refused). |
+| `frame_spokes` | `null` | Spokes per frame. `null` or `subset`: the method subset, the smallest count that covers the sphere (`NGoldenSpokesPerSubset`; one grid frame). `repetition`: one repetition per frame. `all`: every spoke of every repetition read in one image (the anatomical reference, section 10.3). Integer: a spoke count. Default scans keep one repetition per frame (`subset` is refused). |
 | `frame_step` | `null` | Spokes between frame starts (`null`: `frame_spokes`). Smaller is a sliding window, larger leaves spokes out. |
 | `frame_accumulate` | `false` | Every frame starts at the first spoke and holds `frame_spokes` + k x `frame_step` spokes; the last one holds every spoke read. |
 | `peri_event` | `null` | Event-related frames: one image per time bin relative to an event that repeats every `period` seconds, each bin holding that bin's spokes from every event. Comma-separated fields `period=` and `bin=` (seconds, both required), with optional `onset=` (seconds to the first event, default 0), `start=` (seconds from onset to the first bin, default 0, may be negative), `bins=` (default `ceil(period / bin)`, the whole period; a warning when the bins run past the period) and `events=` (default: every event that fits). Example: `peri_event=period=20,bin=1,onset=1`. A bin that gets no spokes is an all-zero frame with a warning; only a plan with no spokes raises. The frame axis is bins: `pixdim[4]` is the bin width. The golden trajectory repeats every `NPro` spokes, so events land on `NPro / gcd(period_spokes, NPro)` distinct phases: when the period divides the repetition evenly the bins re-sample a few directions many times, and the log reports the unique spoke count to judge against the Nyquist count of the reconstruction matrix. Details: section 10.1 (`perievent.py:154-259`). |
 | `peri_censor` | `null` | Path to a 1D file of 0/1, one row per equal block of the stream's spokes (rows must divide the spokes read; each row covers spokes / rows spokes), 1 = usable. A peri-event range is used only when all of its spokes are usable; the per-bin scale divides by the ranges that reached each bin. Needs `peri_event` (a `ValueError` without it). Also excludes the censored spokes from the `subtract_rep_mean` average. Section 10.1 (`perievent.py:126-151`, `frames.py:229-231`). |
 | `subtract_rep_mean` | `false` | Average each spoke position over the repetitions read (censored spokes excluded) and subtract that average from every occurrence before gridding. What is fixed for a spoke position cancels, leaving what varies between repetitions. Needs a frame plan (`peri_event` or a frame option; a `ValueError` without one) and at least 2 repetitions. Task-neutral only when the repetition length is not a multiple of the event period. Section 10.1 (`frames.py:232-235`, `frames.py:462-483`). |
 | `rep_pattern` | `none` | `none`, `model` or `measured`. Removes the repetition-locked undersampling pattern from every complex frame before the magnitude. `model` subtracts the pattern of a forward model of the frame's own spokes (any number of repetitions); `measured` writes the `subtract_rep_mean` residual plus the all-spoke image (at least 2 repetitions, not with `peri_censor`). Needs a frame plan, refused together with `subtract_rep_mean` (each a `ValueError`). Keyed only when not `none`. Section 10.2 (`frames.py:261-271`, `frames.py:584-668`). |
+| `anat_solver` | `adjoint` | `adjoint` or `cg`. `cg` reconstructs the image of `frame_spokes: all` by conjugate gradients on the normal equations of all spokes instead of the adjoint (section 10.3). Needs `frame_spokes: all`; refused with `peri_event`, `frame_step`, `frame_accumulate`, `rep_pattern`, `subtract_rep_mean`. Keyed only when not `adjoint`. |
+| `anat_cg_iter` | `10` | CG iterations of `anat_solver: cg` (a positive integer; refused with the adjoint). |
+| `anat_lambda` | `0.0` | Tikhonov weight of `anat_solver: cg`, at least 0, absolute (its useful scale depends on the data gain). Refused with the adjoint. |
 
 Read-time options (they choose what is returned from the cache and are not part of its key):
 

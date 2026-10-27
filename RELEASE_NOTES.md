@@ -15,6 +15,12 @@ on top of it). Details and equations: `docs/technical-note.md`, section 10.1.
   pattern of a forward model of the frame's own spokes, `measured` writes the `subtract_rep_mean` residual plus the
   all-spoke image. Needs a frame plan; refused with `subtract_rep_mean`; `measured` needs 2 repetitions and is
   refused with `peri_censor`. Keyed only when set. Equations: `docs/technical-note.md`, section 10.2.
+- `anat_solver` (`adjoint`, `cg`; default `adjoint`), `anat_cg_iter` (default 10), `anat_lambda` (default 0) and
+  the new `frame_spokes: all` (every spoke of every repetition in one image): the anatomical reference of the
+  scan itself, by conjugate gradients on the normal equations of all spokes (same weights, kept samples and
+  predicted centre samples as the frames) instead of the adjoint. One 3D image per channel, same affine; the
+  log and the cache `.json` record the solver, iterations, lambda and the final relative residual. Keyed only
+  when not `adjoint`. Equations: `docs/technical-note.md`, section 10.3.
 - Dependency pin `finufft<2.5` (`pyproject.toml:19`); the suite is run with finufft 2.4.1.
 
 Behaviour changes in the peri-event stage:
