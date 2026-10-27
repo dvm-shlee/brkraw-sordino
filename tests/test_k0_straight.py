@@ -293,4 +293,5 @@ def test_options_fields_are_unchanged(tmp_path, monkeypatch):
     assert sorted(asdict(_build_options({}))) == sorted([
         "ext_factors", "ignore_samples", "offset", "num_frames", "correct_spoketiming", "correct_ramptime",
         "offreso_freqs", "mem_limit", "clear_cache", "split_ch", "cache_dir", "as_complex", "estimate_k0",
-        "frame_spokes", "frame_step", "frame_accumulate", "golden_weights", "recon_matrix"])
+        "frame_spokes", "frame_step", "frame_accumulate", "golden_weights", "recon_matrix",
+        "peri_event", "peri_censor", "subtract_rep_mean"])

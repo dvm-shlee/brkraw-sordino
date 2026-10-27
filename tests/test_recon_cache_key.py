@@ -43,10 +43,13 @@ def test_every_other_option_is_in_the_key(tmp_path):
     # golden_weights (WI-0113 run 6) is keyed through the weight rule of golden scans ("density")
     keyed = set(_params(tmp_path)["options"])
     names = {f.name for f in fields(Options)}
-    # recon_matrix (WI-0132) is keyed as its own "recon_matrix" entry only when set
-    assert keyed == names - set(hook.RECON_KEY_EXCLUDED) - set(FRAME_KEYS) - {"golden_weights", "recon_matrix"}
+    # recon_matrix (WI-0132) is keyed as its own "recon_matrix" entry only when set, and
+    # subtract_rep_mean likewise: a plain run keeps the key it had before the option existed
+    assert keyed == names - set(hook.RECON_KEY_EXCLUDED) - set(FRAME_KEYS) - {
+        "golden_weights", "recon_matrix", "subtract_rep_mean"}
     assert "recon_matrix" not in _params(tmp_path)
     assert _params(tmp_path, recon_matrix=4)["recon_matrix"]["matrix"] == [4, 4, 4]
+    assert "subtract_rep_mean" not in _params(tmp_path)
 
 
 @pytest.mark.parametrize("kw", [

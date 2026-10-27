@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 from .typing import Options
 from .boolopt import parse_bool
 from . import frames as frames_mod
-from . import dcf, golden, kcentre, lowres
+from . import dcf, golden, kcentre, lowres, perievent
 from .traj import get_trajectory, trajectory_rows  # noqa: F401  (get_trajectory: tests patch it)
 from .recon import (
     GRID_RULE,
@@ -143,6 +143,7 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         "estimate_k0",
         "golden_weights",
         "recon_matrix",
+        "subtract_rep_mean",
     } | set(READ_KEYS) | set(frames_mod.FRAME_KEYS)
     unknown_keys = sorted(set(kwargs.keys()) - known_keys)
     if unknown_keys:
@@ -180,6 +181,9 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         frame_accumulate=parse_bool("frame_accumulate", kwargs.get("frame_accumulate", False)),
         golden_weights=golden_weights,
         recon_matrix=lowres.parse(kwargs.get("recon_matrix")),
+        peri_event=perievent.parse_peri_event(kwargs.get("peri_event")),
+        peri_censor=kwargs.get("peri_censor") or None,
+        subtract_rep_mean=parse_bool("subtract_rep_mean", kwargs.get("subtract_rep_mean", False)),
     )
 
 
@@ -389,7 +393,7 @@ def _build_cache_params(
     # without frames (one repetition per frame) is the key from before CP3
     keyed = {k: v for k, v in asdict(options).items()
              if k not in RECON_KEY_EXCLUDED and k not in frames_mod.FRAME_KEYS
-             and k not in ("golden_weights", "recon_matrix")}
+             and k not in ("golden_weights", "recon_matrix", "subtract_rep_mean")}
     params = {
         "scan_id": getattr(scan, "scan_id", None),
         "reco_id": reco_id,
@@ -403,6 +407,9 @@ def _build_cache_params(
     }
     if frame_plan is not None:
         params["frames"] = frame_plan.key()
+        if getattr(options, "subtract_rep_mean", False):
+            # the images differ, so they must not share a cache entry with a plain run
+            params["subtract_rep_mean"] = True
     if dcf.is_golden(recon_info):
         # golden trajectories: the density-weight rule of the golden_weights choice (WI-0113 runs 5
         # and 6; the default "capped" is the run-5 key); Default keys unchanged
@@ -1039,7 +1046,8 @@ def get_dataobj(
                         fid_fobj, traj, recon_info, img_fobj, options, frame_plan,
                         phase_factor=phase_factor, virtual_traj=virtual_traj, k0_out=k0_frames,
                         chunk_spokes=chunk_spokes, k0_method=info.get("recon_k0_method"),
-                        weights=weights, out_scale=out_scale)
+                        weights=weights, out_scale=out_scale,
+                        subtract_rep_mean=options.subtract_rep_mean)
                 else:
                     logger.debug("Spoketiming correction disabled.")
                     dtype = recon_dataobj(fid_fobj, traj, recon_info, img_fobj, options,
