@@ -819,7 +819,13 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
                     # gain c of T_all / (n_rep nf) on x_hat (Rayleigh quotient over all channels);
                     # the residual term of a frame is divided by it (technical note, section 10.4)
                     den = float(np.vdot(xs, xs).real)
-                    c = float(np.vdot(xs, full).real) / (plan.n_rep * nf * den) if den > 0 else 1.0
+                    num = float(np.vdot(xs, full).real)
+                    if virtual_traj is not None:
+                        # the virtual-centre term belongs to the same operator as the solve and the residual
+                        vflat = np.asarray(w_virtual, dtype=np.float64).reshape(-1)
+                        num += plan.n_rep * sum(
+                            float(np.vdot(xc, serial.normal_on(xc, virtual_traj, vflat)).real) for xc in xs)
+                    c = num / (plan.n_rep * nf * den) if den > 0 else 1.0
                     gain = 1.0 / c if c > 0 else 1.0
             else:
                 xs = None

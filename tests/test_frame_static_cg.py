@@ -118,6 +118,32 @@ def test_frame_static_with_estimate_k0_runs(tmp_path):
     assert rec["solver"] == "cg"
 
 
+def _k0_frames(tmp_path, info, samples, **kw):
+    """Complex frames with estimate_k0 on (the virtual-centre term in the operator)."""
+    options = _opts(tmp_path, estimate_k0=True, **kw)
+    plan = frames.make_plan(info, options)
+    buf = io.BytesIO()
+    frames.recon_frames(io.BytesIO(_encode(samples)), trajectory_rows(info, options), info, buf, options, plan,
+                        phase_factor=phase_correction_rows(info, options, N_POINTS),
+                        virtual_traj=kcentre.leading_points(info, 1), chunk_spokes=200)
+    data = np.frombuffer(buf.getvalue(), dtype=np.complex128).reshape((plan.n_frames, *SHAPE[::-1]))
+    return plan, data.transpose(0, 3, 2, 1)
+
+
+def test_static_object_with_estimate_k0_gives_x_hat_in_every_frame(tmp_path):
+    # the residual gain uses the same normal operator as the solve (virtual-centre term included),
+    # so a static object leaves a zero residual term and each frame is x_hat
+    info, x = _info(2), _phantom()
+    samples = _samples(tmp_path, info, [x, x])
+    plan, cg = _k0_frames(tmp_path / "cg", info, samples, frame_spokes=FS, rep_pattern="model",
+                          frame_static="cg", frame_static_iter=EXACT_ITER)
+    _, xhat = _k0_frames(tmp_path / "xhat", info, samples, frame_spokes="all", anat_solver="cg",
+                         anat_cg_iter=EXACT_ITER)
+    assert plan.n_frames == 2 * POSITIONS
+    for f in cg:
+        assert _rel(f, xhat[0]) < 1e-2
+
+
 def test_option_values_and_guards(tmp_path):
     def opts(**kw):
         return _build_options({"cache_dir": str(tmp_path), **kw})
