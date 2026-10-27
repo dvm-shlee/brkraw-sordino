@@ -22,13 +22,16 @@ reconstruction options (KEY=default):
   cache_dir=~/.brkraw/cache/sordino   cache folder (or BRKRAW_CONFIG_HOME)
 
 frame options (golden scans; a Default scan only with a spoke count):
-  frame_spokes=null          spokes per frame: subset, repetition or count
+  frame_spokes=null          spokes per frame: subset, repetition, all or count
   frame_step=null            spokes between frame starts (null: frame_spokes)
   frame_accumulate=false     every frame starts at the first spoke
   peri_event=null            event bins: period=,bin= (bins=ceil(period/bin))
   peri_censor=null           0/1 file, one row per spoke block; needs peri_event
   subtract_rep_mean=false    subtract repetition mean (needs frames, 2+ reps)
   rep_pattern=none           remove the repeated pattern: none, model, measured
+  anat_solver=adjoint        frame_spokes=all image: adjoint or cg (all spokes)
+  anat_cg_iter=10            CG iterations of anat_solver=cg
+  anat_lambda=0.0            Tikhonov weight of anat_solver=cg (relative)
 
 read-time options (not in the cache key):
   frames=null                frames to return: int, list or "start:stop:step"

@@ -118,7 +118,7 @@ def test_documented_choices_exist():
 def test_docs_md_is_a_cli_usage_page():
     """WI-0138: what ``brkraw hook docs sordino`` prints is short, 80 columns, usage lines first."""
     lines = DOCS.splitlines()
-    assert len(lines) <= 40
+    assert len(lines) <= 43
     assert max(len(ln) for ln in lines) <= 80, [ln for ln in lines if len(ln) > 80]
     assert lines[2].startswith("usage: brkraw convert STUDY -s SCAN")
     assert "-H sordino:KEY=VALUE" in DOCS and "--hook-args-yaml FILE" in DOCS
