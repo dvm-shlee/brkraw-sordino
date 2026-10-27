@@ -22,7 +22,7 @@ from test_serial_recon import N_POINTS, SHAPE
 POSITIONS = 20           # 800 spokes per repetition / the 40-spoke method subset
 SUBSET = None            # frame_spokes at its default: the method subset
 FS = SUBSET
-EXACT_ITER = 100         # noise-free solve long enough for the residual to vanish
+EXACT_ITER = 200         # noise-free solve long enough for the residual to vanish
 
 
 def _frames(tmp_path, info, samples, out=None, **kw):

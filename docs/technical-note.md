@@ -754,6 +754,9 @@ hooks:
 | `mem_limit` | `0.5` | GB for the FID segments of `correct_spoketiming` (divided by a safety factor 3.4). Not the reconstruction memory limit. |
 | `clear_cache` | `true` | Removes leftover temporary files after conversion; finished caches stay. |
 | `cache_dir` | `~/.brkraw/cache/sordino` | Cache folder (or `BRKRAW_CONFIG_HOME`). |
+| `frame_static` | `adjoint` | `adjoint` or `cg`. With `cg` the static part of the `rep_pattern: model` frames is the CG solution itself instead of its adjoint image, and the residual term is scaled to the units of that solution (section 10.4). Needs `rep_pattern: model`; refused with `anat_solver: cg`. Keyed only when not `adjoint`. |
+| `frame_static_iter` | `10` | CG iterations of `frame_static: cg` (a positive integer; refused with the adjoint). |
+| `frame_static_lambda` | `0.0` | Tikhonov weight of `frame_static: cg`, at least 0, absolute. Refused with the adjoint. |
 
 Frames (golden scans; a Default scan only when `frame_spokes` is a spoke count). The spoke
 directions come from the method parameter `TrajectoryMode` (`Default`, `GoldenSampling`,
@@ -772,11 +775,7 @@ directions come from the method parameter `TrajectoryMode` (`Default`, `GoldenSa
 | `anat_cg_iter` | `10` | CG iterations of `anat_solver: cg` (a positive integer; refused with the adjoint). |
 | `anat_lambda` | `0.0` | Tikhonov weight of `anat_solver: cg`, at least 0, absolute (its useful scale depends on the data gain). Refused with the adjoint. |
 
-Static image of the `rep_pattern: model` frames (section 10.4):
-
-- `frame_static` (default `adjoint`): `adjoint` or `cg`. With `cg` the static part of the `rep_pattern: model` frames is $\hat x$ itself (CG) instead of its adjoint image, and the residual term is scaled to the units of $\hat x$ (section 10.4). Needs `rep_pattern: model`; refused with `anat_solver: cg`. Keyed only when not `adjoint`.
-- `frame_static_iter` (default `10`): CG iterations of `frame_static: cg` (a positive integer; refused with the adjoint).
-- `frame_static_lambda` (default `0.0`): Tikhonov weight of `frame_static: cg`, at least 0, absolute. Refused with the adjoint.
+The static image of the `rep_pattern: model` frames has its own options, `frame_static`, `frame_static_iter` and `frame_static_lambda` (section 10.4; table above).
 
 Read-time options (they choose what is returned from the cache and are not part of its key):
 
