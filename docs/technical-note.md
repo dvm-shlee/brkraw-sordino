@@ -113,7 +113,7 @@ repetition of a Golden Grid scan ran along the Default list (section 3.1 with th
 the golden `ACQ_O1_list` frequencies, and from spoke $N_h$ on along the golden list (**inference**
 from the data; ParaVision's internal order is not documented; it looks like a movement of a few mm
 in the first seconds, but it is not motion). $N_h$ is the count that the Default loop gives for
-ProUnderSampling (12,732 spokes in the two Golden Grid scans examined), at most $N_{\mathrm{pro}}$. The hook decides from the scan's `traj` file: its first lines are the
+ProUnderSampling, at most $N_{\mathrm{pro}}$. The hook decides from the scan's `traj` file: its first lines are the
 Default list (rule on) or the golden list (rule off, as a fixed sequence would write it); without
 a `traj` file the rule applies only to `sordino_260801`; for `GoldenSampTraj = Yes` it is off.
 When on, those spokes are placed along the Default list and the receiver-frequency difference is
@@ -289,8 +289,7 @@ $$\mathbf c=\mathbf p_0+R^{\mathsf T}\big(\mathbf v\odot\boldsymbol\rho\odot\mat
 with $\mathbf p_0$ `VisuCorePosition` (first voxel centre), $R$ `VisuCoreOrientation` (rows: image axis
 directions), $\mathbf v$ the voxel size (`VisuCoreExtent` / `VisuCoreSize`), $\boldsymbol\rho$ `RECO_rotate` and
 $\mathbf n$ the reconstruction size (`RECO_transposition` 1 swaps the first two image axes; other
-transpositions give no centre; 3D data only). On the phantom it equals the slice-pack position (`PVM_SliceGeo`) to
-$10^{-6}$ mm. Without reco parameters (no affine), with several slice packs, or when the centre cannot
+transpositions give no centre; 3D data only). For a single slice pack it equals the slice-pack position (`PVM_SliceGeo`). Without reco parameters (no affine), with several slice packs, or when the centre cannot
 be read, the grid stays at $\lfloor\mathbf M/2\rfloor$ (an info line says so).
 
 For axial scans $\mathbf s=(0,0,-0.5)$ voxel: before this change every
@@ -323,7 +322,7 @@ so that every object stays where it was and the phase origin still maps to $\mat
 differ in parity the extra voxel sits on one side and the FOV centre moves by half a voxel while
 the objects do not. Before this fix a factor other than 1 on index 0 or 1 moved the image when the output
 reorders those axes (the offset grows with the matrix), and a size that is not a
-whole multiple (or an odd matrix) gave a sub-voxel shift ($16\times1.1$: 0.3 mm). `ext_factors=1` is
+whole multiple (or an odd matrix) gave a sub-voxel shift. `ext_factors=1` is
 unchanged; the reconstruction and its cache key were not changed for any value by that fix.
 
 ### 8.3 Orientation
@@ -659,7 +658,7 @@ brkraw convert /path/to/study -s 11 -r 1 \
   one. Example (two approved coronal scans, readout `H_F`, quadruped, `Head_Supine`,
   `subject_ras`): index 0 widens posterior-anterior, 1 left-right, 2 inferior-superior; the
   output array holds index 1 on axis 0 and index 0 on axis 1.
-- **`estimate_k0` is on by default** and costs time and memory. Memory is a fixed part plus one chunk of spokes and does not grow with spokes or frames. When the default limit is too small for a large scan the size check stops with an offer of a larger limit; `estimate_k0: false` needs less. Set to `true` explicitly it stops with an error when the values it needs are missing (the sequence timing, or with `correct_ramptime: false` only `AcqDelayTotal`, `PVM_EffSWh`, `OverSampling`); left at the default it is switched off with an info line then. Caches made before it became the default are found again only with `estimate_k0: false`.
+- **`estimate_k0` is on by default** and costs time and memory. Memory is a fixed part plus one chunk of spokes and does not grow with spokes or frames. When the default limit is too small for a large scan the size check stops with an offer of a larger limit; `estimate_k0: false` needs less. Set to `true` explicitly it stops with an error when the values it needs are missing (the sequence timing, or with `correct_ramptime: false` only `AcqDelayTotal`, `PVM_EffSWh`, `OverSampling`); left at the default it is switched off with an info line then. Caches made before it became the default are found again only with `estimate_k0: false`. (Default `hook.py:159-162`; the error `hook.py:195-214`; the switch-off with an info line `hook.py:799-803`; the size check `memguard.py:262-274`.)
 - **`estimate_k0` with `correct_ramptime: false` and on a general ZTE.** Before, `correct_ramptime: false` switched `estimate_k0` off (an explicit `true` was an error) and a general ZTE was always reconstructed without it. Now both follow `estimate_k0` (default `true`): those results change and their caches get a new key (`estimate_k0: false` gives the old result and finds the old caches). The virtual centre samples continue each spoke's straight line back to the RF centre. On SORDINO data with `correct_ramptime: false` the straight line only approximates the ramped spokes: treat that combination as an experiment.
 - **Wide centre gap.** The fill is a least-squares solve with the FOV as the only constraint. Its iterations follow the gap (the first kept sample's distance from k = 0 in k-grid units; SORDINO data: 0.5-1.2): 10 up to 1.3, 40 up to 1.8, 160 above (synthetic data: K0 within 0.1 % up to 1.8 and 0.5 % at 2.0; 10 iterations alone degrade above 1.3). Above 2.0 a warning gives the gap; the reconstruction still runs. `ignore_samples: 0` narrows the gap by 1 / OverSampling when the first sample is usable. The gap is in `kspace_gap` of the cache `.json`.
 - **ZTE-mode scans of the SORDINO sequence.** `sordino_260801` can run in ZTE mode (`SequenceMode = ZTE`: per the sequence source the gradient reaches each spoke's vector before the RF pulse and stays constant while sampling). The method file still holds `RampTime` and `MaximizeRampTime`, and the hook does not tell such scans apart from the header: it applies the SORDINO ramp model. Set `correct_ramptime: false` (and keep `estimate_k0: true`) for them yourself.
@@ -668,17 +667,17 @@ brkraw convert /path/to/study -s 11 -r 1 \
   The cache holds 16 n_ch M1 M2 M3 bytes per frame (section 10). The size
   check runs first and stops with the sizes; use larger `frame_spokes`, fewer repetitions
   (`num_frames`) or `frame_spokes: repetition`. A sliding window also keeps one running-sum
-  copy per open frame start (`frame_spokes` / `frame_step` copies).
-- **`recon_matrix` grid and values.** The grid is the one ParaVision writes for a scan of that matrix with the same FOV and centre, so the FOV edges can move by half a full-resolution voxel. Values follow the full image's low-pass; golden scans with `capped` or `pipe` weights re-estimate the weights on the kept samples, which changes the global scale relative to the full image (the shape is kept).
+  copy per open frame start (`frame_spokes` / `frame_step` copies). (`memguard.py:262-274`.)
+- **`recon_matrix` grid and values.** The grid is the one ParaVision writes for a scan of that matrix with the same FOV and centre, so the FOV edges can move by half a full-resolution voxel. Values follow the full image's low-pass; golden scans with `capped` or `pipe` weights re-estimate the weights on the kept samples, which changes the global scale relative to the full image (the shape is kept). (`lowres.py:97-113`.)
 - **NIfTI is uint16 with slope and intercept.** Converted files are stored as 16-bit integers; the true value is `inter + slope * stored`.
 - **Frames:** `correct_spoketiming` cannot be combined with frames (use
   `frame_spokes: repetition`). `estimate_k0` is estimated once from all spokes read. NIfTI
   `pixdim[4]` is `frame_step` x the spoke TR in the unit asked for; for `peri_event` the frame axis is
   bins and `pixdim[4]` is the bin width (section 10.1). Frame spokes, centre times
-  and interval are in `scan._sordino_recon_meta["frames"]`.
+  and interval are in `scan._sordino_recon_meta["frames"]` (`hook.py:918`; `pixdim[4]` is set at `hook.py:1260`).
 - **Grid shift and cache regeneration.** The image is placed where the brkraw affine says; the
-  reconstruction grid is moved by a derived shift (section 8). For the phantom
-  scans (axial) it is (0, 0, -0.5) voxel: earlier images sat half a voxel too high on the slice
+  reconstruction grid is moved by a derived shift (section 8). For axial
+  scans it is half a voxel along the slice axis (`hook.py:750-777`): earlier images sat half a voxel too high on the slice
   axis. Recon caches written before this change are not read; they are reconstructed once.
   ParaVision's own reconstruction (pdata/1) sits about half a voxel low on the slice axis; this
   is not corrected here.

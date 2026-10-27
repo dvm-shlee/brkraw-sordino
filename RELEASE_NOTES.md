@@ -72,8 +72,7 @@ Behaviour changes for every scan:
 
 - Image grid: images are now placed where the scan's affine says
   (grid shift = affine index of the FOV centre minus the NUFFT centre `N // 2`).
-  For the axial phantom scans this moves them half a voxel down the slice axis
-  (they sat 0.1 mm too high at 0.2 mm voxels). Default and golden trajectories,
+  For axial scans this moves them half a voxel down the slice axis. Default and golden trajectories,
   frames and `estimate_k0` all follow; the affine does not change. Recon caches
   written before this change are not read (reconstructed once).
 
