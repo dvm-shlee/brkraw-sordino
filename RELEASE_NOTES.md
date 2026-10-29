@@ -1,5 +1,8 @@
 # Unreleased (golden-sordino)
 
+- fix: NIfTI time step for repetition frames. `pixdim[4]` is now `NPro` x TR (for example 180 s for 288,000
+  spokes at 0.625 ms) when each frame is one repetition; it stayed at 1.0 before. Frame modes are unchanged.
+
 New options for event-related golden scans (the peri-event work is by Tzu-Hao Chao; the review fixes below are
 on top of it). Details and equations: `docs/technical-note.md`, section 10.1.
 

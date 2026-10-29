@@ -946,6 +946,10 @@ def get_dataobj(
         "matrix": list(red.matrix), "acquisition_matrix": list(red.base), "ratio": red.ratio, "rule": lowres.RULE}
     frame_plan = plan["frame_plan"]
     recon_meta["frames"] = None if frame_plan is None else frame_plan.describe()
+    # one repetition per frame: the step is NPro spokes (the time step of the NIfTI)
+    tr_ms = recon_info.get("RepetitionTime_ms")
+    recon_meta["repetition_interval_s"] = (
+        int(recon_info["NPro"]) * float(tr_ms) * 1e-3 if tr_ms not in (None, 0, 0.0) else None)
     if frame_plan is not None and options.estimate_k0:
         recon_meta["frames"]["k0_scope"] = "all spokes read"
     recon_meta["anat"] = None if options.anat_solver == "adjoint" else {
@@ -1293,20 +1297,25 @@ _T_UNIT_FACTOR = {"sec": 1.0, "msec": 1e3, "usec": 1e6}
 
 
 def _set_frame_time(nii: Any, scan: Any, t_units: str) -> None:
-    """Golden frames (WI-0113 CP4, D-0190 2): pixdim[4] = frame_step x spoke TR, in ``t_units``.
+    """pixdim[4] = frame step in spokes x spoke TR, in ``t_units``, for a 4D result.
 
-    Only for golden frames with a known TR; one repetition per frame keeps the header
-    as before.
+    A frame plan gives ``frame_interval_s`` (window step; peri-event bin width); one repetition per
+    frame gives NPro x TR (``repetition_interval_s``). Without a TR the header is left as brkraw wrote it.
     """
     meta = getattr(scan, "_sordino_recon_meta", None) or {}
-    frames_meta = meta.get("frames") if isinstance(meta, dict) else None
-    if not frames_meta or not frames_meta.get("frame_interval_s") or len(nii.shape) < 4:
+    if not isinstance(meta, dict):
+        return
+    frames_meta = meta.get("frames")
+    interval = frames_meta.get("frame_interval_s") if frames_meta else None
+    if not interval:
+        interval = meta.get("repetition_interval_s")
+    if not interval or len(nii.shape) < 4:
         return
     factor = _T_UNIT_FACTOR.get(str(t_units))
     if factor is None:
         logger.warning("sordino: frame time not written: time unit %r is not sec, msec or usec.", t_units)
         return
-    nii.header["pixdim"][4] = float(frames_meta["frame_interval_s"]) * factor
+    nii.header["pixdim"][4] = float(interval) * factor
 
 
 def convert(

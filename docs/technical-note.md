@@ -431,6 +431,13 @@ The frames are the fourth axis of the result and of the NIfTI. Time: the NIfTI t
 with accumulation, the growth between frames). The frame list (spoke ranges, centre times
 $(l_k+h_k)\,\mathrm{TR}/2$, interval) is in `scan._sordino_recon_meta["frames"]`.
 
+**`pixdim[4]` per mode.** Always the time between frames, in the unit asked for (`hook.py`, `_set_frame_time`):
+an integer `frame_spokes` with no `frame_step` gives `frame_spokes` x TR; a sliding window gives `frame_step` x TR
+(the step, not the window); `frame_accumulate` gives the step x TR; peri-event bins give the bin width;
+one repetition per frame (`frame_spokes=repetition`, or no frame option) gives `NPro` x TR, for example 288,000
+spokes at 0.625 ms is 180 s; a single 3D image keeps the brkraw value. Without a TR in the header it is left
+as brkraw wrote it.
+
 **Size.** The recon cache holds one complex128 volume per frame (and channel):
 $16\,n_{\mathrm{ch}}M_1M_2M_3$ bytes per frame. A sliding window also holds one copy of the running sum per open frame
 start. The size check runs before anything is reconstructed and stops with the sizes.

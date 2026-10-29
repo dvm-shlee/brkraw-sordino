@@ -111,14 +111,34 @@ def test_nifti_time_step_is_frame_step_times_the_spoke_tr(tmp_path, monkeypatch,
     assert nii.header.get_xyzt_units()[1] == t_units
 
 
-def test_one_repetition_per_frame_keeps_the_header(tmp_path, monkeypatch):
+def test_one_repetition_per_frame_time_step_is_npro_times_the_spoke_tr(tmp_path, monkeypatch):
     info, fid = _setup(tmp_path, n_rep=2)
     info = dict(info, RepetitionTime_ms=0.625)
     _hook_env(monkeypatch, info, fid)
     scan = _Scan()
     data = hook.get_dataobj(scan, None, cache_dir=str(tmp_path / "h"), frame_spokes="repetition")
     nii = hook.convert(scan, data, np.eye(4))
-    assert nii.header["pixdim"][4] == 1.0          # as before CP4 (the hook never set it)
+    assert nii.header["pixdim"][4] == pytest.approx(int(info["NPro"]) * 0.625e-3, rel=1e-6)
+
+
+def test_repetition_time_step_for_288000_spokes_is_180_s():
+    class _S:
+        _sordino_recon_meta = {"frames": None, "repetition_interval_s": 288000 * 0.625e-3}
+
+    nii = hook.Nifti1Image(np.zeros((2, 2, 2, 3), dtype=np.uint16), np.eye(4))
+    hook._set_frame_time(nii, _S(), "sec")
+    assert nii.header["pixdim"][4] == pytest.approx(180.0)
+    hook._set_frame_time(nii, _S(), "msec")
+    assert nii.header["pixdim"][4] == pytest.approx(180000.0)
+
+
+def test_single_3d_image_keeps_the_header():
+    class _S:
+        _sordino_recon_meta = {"frames": None, "repetition_interval_s": 180.0}
+
+    nii = hook.Nifti1Image(np.zeros((2, 2, 2), dtype=np.uint16), np.eye(4))
+    hook._set_frame_time(nii, _S(), "sec")
+    assert nii.header["pixdim"][4] == 1.0
 
 
 # ------------------------------------------------------------------ Default-trajectory keys
