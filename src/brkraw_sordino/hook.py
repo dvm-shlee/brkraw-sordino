@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 from .typing import Options
 from .boolopt import parse_bool
 from . import frames as frames_mod
-from . import dcf, golden, kcentre, lowres, perievent
+from . import dcf, golden, kcentre, lowres, perievent, physio
 from .traj import get_trajectory, trajectory_rows  # noqa: F401  (get_trajectory: tests patch it)
 from .recon import (
     GRID_RULE,
@@ -198,6 +198,15 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         frame_static=frames_mod.parse_frame_static(kwargs.get("frame_static")),
         frame_static_iter=frames_mod.parse_frame_static_iter(kwargs.get("frame_static_iter")),
         frame_static_lambda=frames_mod.parse_frame_static_lambda(kwargs.get("frame_static_lambda")),
+        physio=physio.parse_physio(kwargs.get("physio")),
+        physio_n_inner=physio.parse_n_inner(kwargs.get("physio_n_inner")),
+        physio_resp_band=physio.parse_band(kwargs.get("physio_resp_band"), "physio_resp_band",
+                                           physio.DEFAULT_RESP_BAND),
+        physio_cardiac_band=physio.parse_band(kwargs.get("physio_cardiac_band"), "physio_cardiac_band",
+                                              physio.DEFAULT_CARDIAC_BAND),
+        physio_window_s=physio.parse_window(kwargs.get("physio_window_s")),
+        physio_pca=parse_bool("physio_pca", kwargs.get("physio_pca", True)),
+        physio_prefix=(str(kwargs["physio_prefix"]) if kwargs.get("physio_prefix") else None),
     )
 
 
@@ -907,6 +916,31 @@ def get_dataobj_info(scan: Any, reco_id: Optional[int] = None, **kwargs: Any) ->
     return _plan(scan, reco_id, kwargs)["info"]
 
 
+def _physio_collector(scan: Any, plan: Dict[str, Any], options: Options, recon_info: Dict[str, Any],
+                      frame_plan: Any, phase_factor: Any) -> Optional[physio.Collector]:
+    """The collector the reconstruction pass feeds (``physio=on``), else None."""
+    if not physio.is_on(options):
+        return None
+    fid_shape, _ = parse_fid_info(recon_info)
+    n_points, n_rx, npro = (int(v) for v in fid_shape[1:])
+    n_rep = frame_plan.n_rep if frame_plan is not None else get_num_frames(recon_info, options)
+    censor = perievent.load_censor(options.peri_censor, n_rep * npro)
+    return physio.Collector(
+        npro, n_rep, n_rx, recon_info.get("RepetitionTime_ms"), options, phase_factor=phase_factor,
+        ignore_samples=options.ignore_samples or 1, bandwidth=recon_info.get("EffBandwidth_Hz"),
+        over_sampling=recon_info.get("OverSampling"), n_points=n_points, censor=censor,
+        correct_ramptime=options.correct_ramptime)
+
+
+def _physio_prefix(scan: Any, plan: Dict[str, Any], options: Options) -> str:
+    """Where the physio files go: ``physio_prefix``, else ``<cache_dir>/scan<id>`` (``reco<id>``)."""
+    if options.physio_prefix:
+        return os.path.expanduser(options.physio_prefix)
+    reco = plan["cache_params"].get("reco_id")
+    name = f"scan{getattr(scan, 'scan_id', 'x')}" + ("" if reco is None else f"_reco{reco}")
+    return str(Path(options.cache_dir) / name)
+
+
 def get_dataobj(
         scan: Any, reco_id: Optional[int] = None, **kwargs: Any,
     ) -> Optional[Union[np.ndarray, Tuple[np.ndarray, ...]]]:
@@ -976,6 +1010,12 @@ def get_dataobj(
     if cached_dtype is not None and red is not None and plan["img_meta"] and plan["img_meta"].get("recon_matrix"):
         recon_meta["recon_matrix"] = plan["img_meta"]["recon_matrix"]     # with the cut details (WI-0132)
 
+    setattr(scan, "_sordino_physio", None)
+    setattr(scan, "_sordino_physio_prefix", _physio_prefix(scan, plan, options))
+    if (physio.is_on(options) and options.correct_spoketiming and cached_dtype is not None
+            and cached_shape is not None):
+        # the traces come from the spoke-timing corrected FID of a reconstruction pass, not from the cache
+        cached_dtype, cached_shape = None, None
     if cached_dtype is None or cached_shape is None:
         with fid_entry.open() as fid_fobj:
             # per-chunk trajectory and phase rows (WI-0097): no whole trajectory, no
@@ -996,6 +1036,7 @@ def get_dataobj(
                     logger.info("estimate_k0: the Toeplitz solve does not fit the memory limit; "
                                 "using the sample-based solve, which fits (slower).")
             out_scale = 1.0
+            collector = _physio_collector(scan, plan, options, recon_info, frame_plan, phase_factor)
             reduction = plan["reduction"]
             if reduction is not None:
                 # recon_matrix (WI-0132): spokes cut at the small grid's Nyquist radius, points in its units
@@ -1085,6 +1126,7 @@ def get_dataobj(
                             k0_method=info.get("recon_k0_method"),
                             weights=weights,
                             out_scale=out_scale,
+                            physio=collector,
                         )
                 elif frame_plan is not None:
                     dtype = frames_mod.recon_frames(
@@ -1092,7 +1134,7 @@ def get_dataobj(
                         phase_factor=phase_factor, virtual_traj=virtual_traj, k0_out=k0_frames,
                         chunk_spokes=chunk_spokes, k0_method=info.get("recon_k0_method"),
                         weights=weights, out_scale=out_scale,
-                        subtract_rep_mean=options.subtract_rep_mean, anat_out=anat_out)
+                        subtract_rep_mean=options.subtract_rep_mean, anat_out=anat_out, physio=collector)
                     if anat_out and recon_meta["frame_static"]:
                         recon_meta["frame_static"] = dict(
                             recon_meta["frame_static"], iterations_run=anat_out["iterations_run"],
@@ -1106,8 +1148,10 @@ def get_dataobj(
                                           virtual_traj=virtual_traj, k0_out=k0_frames,
                                           chunk_spokes=chunk_spokes,
                                           k0_method=info.get("recon_k0_method"),
-                                          weights=weights, out_scale=out_scale)
+                                          weights=weights, out_scale=out_scale, physio=collector)
             os.replace(img_temp_path, img_cache_path)
+        if collector is not None:
+            setattr(scan, "_sordino_physio", collector.finish())
         if options.estimate_k0:
             recon_meta["k0"] = [[[float(k.real), float(k.imag)] for k in frame] for frame in k0_frames]
         dataobj_shape = _result_shape(recon_info, options, frame_plan)
@@ -1128,6 +1172,16 @@ def get_dataobj(
         )
     else:
         logger.debug("Using cached recon file: %s", img_cache_path)
+        if physio.is_on(options):
+            logger.info("physio: the images are cached; reading the FID once for the traces only.")
+            with fid_entry.open() as fid_fobj:
+                phase_factor = phase_correction_rows(
+                    recon_info, options, int(parse_fid_info(recon_info)[0][1]))
+                n_rep = frame_plan.n_rep if frame_plan is not None else get_num_frames(recon_info, options)
+                censor = perievent.load_censor(options.peri_censor, n_rep * int(recon_info["NPro"]))
+                setattr(scan, "_sordino_physio", physio.extract_stream(
+                    fid_fobj, recon_info, options, n_rep, phase_factor=phase_factor,
+                    chunk_spokes=info.get("recon_chunk_spokes"), censor=censor))
         if options.estimate_k0:
             logger.info("Reading the recon cache reconstructed with estimate_k0 "
                         "(k-space centre estimated).")
@@ -1353,6 +1407,12 @@ def convert(
                     except Exception:
                         pass
         nii_list.append(nii)
+    result = getattr(scan, "_sordino_physio", None)
+    if result is not None and physio.is_on(options):
+        prefix = getattr(scan, "_sordino_physio_prefix", None) or _physio_prefix(
+            scan, {"cache_params": {}}, options)
+        tsv, sidecar = physio.write(result, prefix)
+        logger.info("physio: wrote %s and %s", tsv, sidecar)
     if options.clear_cache:
         _clear_cache_files(scan)
     if isinstance(dataobj, tuple) or isinstance(affine, tuple):
