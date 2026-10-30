@@ -36,17 +36,15 @@ frame options (golden scans; a Default scan only with a spoke count):
   frame_static_iter=10       CG iterations of frame_static=cg
   frame_static_lambda=0.0    Tikhonov weight of frame_static=cg (absolute)
 
-physio options (side file; not in the cache key):
+physio options (side file; not in cache key):
   physio=off                 on: respiration/heart rate from the spokes
   physio_n_inner=6           innermost samples per spoke (after ignore_samples)
   physio_resp_band=0.5,5     respiratory band, low,high in Hz
   physio_cardiac_band=5,15   cardiac band, low,high in Hz
   physio_window_s=3,1        rate window in s: respiration,cardiac
   physio_pca=true            PCA trace per band (false: mean)
-  physio_prefix=null         output prefix (null: <cache_dir>/scan<id>)
-  physio_traj_period=auto    trajectory periodicity removed from the traces: auto (2 x method subset
-                             of a golden scan), off, or a number of spokes
-  writes <prefix>_physio.tsv.gz (+ .json): time_s,respiratory,cardiac,quality
+  physio_prefix=null         output prefix; writes <prefix>_physio.tsv.gz/.json
+  physio_traj_period=auto    trajectory period removed: auto, off or spokes
 
 read-time options (not in the cache key):
   frames=null                frames to return: int, list or "start:stop:step"

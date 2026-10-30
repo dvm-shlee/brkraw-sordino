@@ -11,7 +11,7 @@ import json
 import numpy as np
 import pytest
 
-from brkraw_sordino import frames, hook, physio, recon
+from brkraw_sordino import frames, golden, hook, physio, recon
 from brkraw_sordino.recon import phase_correction_rows
 from brkraw_sordino.traj import trajectory_rows
 
@@ -273,7 +273,8 @@ def test_the_physio_pass_equals_the_stand_alone_read(tmp_path):
                  physio_resp_band="2,40", physio_cardiac_band="45,200", frame_spokes=100)
     phase = phase_correction_rows(info, opts, N_POINTS)
     plan = frames.make_plan(info, opts)
-    col = physio.Collector(n_pro, 3, 1, 1.0, opts, phase_factor=phase, ignore_samples=1, n_points=N_POINTS)
+    col = physio.Collector(n_pro, 3, 1, 1.0, opts, phase_factor=phase, ignore_samples=1, n_points=N_POINTS,
+                           traj_unit=golden.golden_unit(info))
     frames.recon_frames(io.BytesIO(_encode(samples)), trajectory_rows(info, opts), info, io.BytesIO(), opts,
                         plan, phase_factor=phase, chunk_spokes=200, physio=col)
     ref = col.finish()
