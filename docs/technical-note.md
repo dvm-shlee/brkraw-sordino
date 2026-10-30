@@ -781,6 +781,13 @@ directions come from the method parameter `TrajectoryMode` (`Default`, `GoldenSa
 | `anat_solver` | `adjoint` | `adjoint` or `cg`. `cg` reconstructs the image of `frame_spokes: all` by conjugate gradients on the normal equations of all spokes instead of the adjoint (section 10.3). Needs `frame_spokes: all`; refused with `peri_event`, `frame_step`, `frame_accumulate`, `rep_pattern`, `subtract_rep_mean`. Keyed only when not `adjoint`. |
 | `anat_cg_iter` | `10` | CG iterations of `anat_solver: cg` (a positive integer; refused with the adjoint). |
 | `anat_lambda` | `0.0` | Tikhonov weight of `anat_solver: cg`, at least 0, absolute (its useful scale depends on the data gain). Refused with the adjoint. |
+| `physio` | `off` | `off` or `on`. `on` extracts respiration and heart rate from the innermost spoke samples in the same FID pass and writes them to a side file; images and the recon cache are unchanged. |
+| `physio_n_inner` | `6` | Number of innermost samples per spoke used for the trace (a positive integer). |
+| `physio_resp_band` | `0.5,5` | Respiration band in Hz, `low,high`. |
+| `physio_cardiac_band` | `5,15` | Cardiac band in Hz, `low,high`. |
+| `physio_window_s` | `3,1` | Estimation windows in seconds, `respiration,cardiac`. |
+| `physio_pca` | `true` | Combine the inner samples by principal component (true) or by their mean. |
+| `physio_prefix` | `null` | Path prefix of the side files; default derived from the scan. |
 
 The static image of the `rep_pattern: model` frames has its own options, `frame_static`, `frame_static_iter` and `frame_static_lambda` (section 10.4; table above).
 

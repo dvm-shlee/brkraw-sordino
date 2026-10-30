@@ -57,6 +57,16 @@ class Options:
     frame_static: str = "adjoint"
     frame_static_iter: int = 10
     frame_static_lambda: float = 0.0
+    # Respiration and heart rate from the innermost spoke samples (physio.py): "off" or "on", written to a
+    # side file in the same FID pass; the bands (Hz) and the windows (s) are "low,high" and
+    # "respiration,cardiac" texts. Never in the recon cache key (physio.PHYSIO_KEYS).
+    physio: str = "off"
+    physio_n_inner: int = 6
+    physio_resp_band: str = "0.5,5"
+    physio_cardiac_band: str = "5,15"
+    physio_window_s: str = "3,1"
+    physio_pca: bool = True
+    physio_prefix: Optional[str] = None
 
 
 __all__ = [

@@ -50,12 +50,13 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
-from . import frameplan, golden, perievent
+from . import frameplan, golden, perievent, physio
 
 logger = logging.getLogger(__name__)
 
 #: Options of this module; they enter the recon cache key through ``FramePlan.key``.
-FRAME_KEYS = ("frame_spokes", "frame_step", "frame_accumulate") + perievent.PERI_KEYS
+#: The peri-event and physio keys are owned by their modules and excluded from the raw option key.
+FRAME_KEYS = ("frame_spokes", "frame_step", "frame_accumulate") + perievent.PERI_KEYS + physio.PHYSIO_KEYS
 
 #: Measured in WI-0112 (scan 11, 3,200-spoke windows): largest gap between spoke
 #: directions from a subset start, from the middle of a subset, across a repetition end.
@@ -569,7 +570,8 @@ def _anat_image(options, kernel, xs, full, preds, virtual_traj, w_virtual, adj, 
 
 def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, plan: FramePlan, *,
                  phase_factor=None, virtual_traj=None, k0_out=None, chunk_spokes=None, k0_method=None,
-                 weights=None, spoke_mask=None, out_scale=1.0, subtract_rep_mean=False, anat_out=None):
+                 weights=None, spoke_mask=None, out_scale=1.0, subtract_rep_mean=False, anat_out=None,
+                 physio=None):
     """Write the frames of ``plan`` to ``img_fobj`` (the layout of ``recon_dataobj``); return their dtype.
 
     ``traj`` (``TrajectoryRows`` or an array), ``phase_factor`` (``PhaseRows`` or an array) and
@@ -605,6 +607,9 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
 
     Costs one extra read of the FID and one array of
     (NPro, receivers, points) complex64.
+
+    ``physio`` (a ``physio.Collector``) is fed the raw rows of every stream chunk the engine reads, with
+    no read of its own; spokes no frame reads stay unusable in its traces.
     """
     from . import memguard, serial
     from .recon import (_row_source, correct_offreso, grid_shift, grid_shift_factor, parse_fid_info,
@@ -740,6 +745,8 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
             for a, b in serial.spoke_ranges(hi - lo, chunk_spokes):
                 a, b = a + lo, b + lo
                 k = stream.read(r * npro + a, b - a)
+                if physio is not None:
+                    physio.feed(r * npro + a, k)       # raw rows of this pass; a spoke read twice counts once
                 if rep_mean is not None and not raw:
                     k = k - rep_mean[a:b]          # residual from this position's own average
                 if phase_factor is not None:

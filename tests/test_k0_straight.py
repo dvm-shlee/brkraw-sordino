@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from brkraw_sordino import hook, kcentre
+from brkraw_sordino.physio import PHYSIO_KEYS
 from brkraw_sordino.hook import _build_options, _resolve_k0
 from brkraw_sordino.recon import build_recon_cache_path, nufft_adjoint, recon_dataobj
 from brkraw_sordino.traj import calc_npro, calc_radial_traj3d, get_trajectory, spoke_directions
@@ -288,7 +289,7 @@ def test_new_defaults_never_read_the_old_no_k0_caches(tmp_path):
 
 
 def test_options_fields_are_unchanged(tmp_path, monkeypatch):
-    """No new option field: every other recon cache key is the one written before WI-0137."""
+    """No other new option field: the physio keys are excluded from the key, the rest is unchanged."""
     monkeypatch.setattr(hook, "_get_cache_dir", lambda path: tmp_path)
     assert sorted(asdict(_build_options({}))) == sorted([
         "ext_factors", "ignore_samples", "offset", "num_frames", "correct_spoketiming", "correct_ramptime",
@@ -296,4 +297,4 @@ def test_options_fields_are_unchanged(tmp_path, monkeypatch):
         "frame_spokes", "frame_step", "frame_accumulate", "golden_weights", "recon_matrix",
         "peri_event", "peri_censor", "subtract_rep_mean", "rep_pattern",
         "anat_solver", "anat_cg_iter", "anat_lambda",
-        "frame_static", "frame_static_iter", "frame_static_lambda"])
+        "frame_static", "frame_static_iter", "frame_static_lambda"] + list(PHYSIO_KEYS))

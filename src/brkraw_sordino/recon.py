@@ -443,7 +443,8 @@ def recon_dataobj(fid_fobj,
                   chunk_spokes=None,
                   k0_method=None,
                   weights=None,
-                  out_scale=1.0):
+                  out_scale=1.0,
+                  physio=None):
     """Reconstruct image volumes from FID data and write to an output file.
 
     Each frame is reconstructed in contiguous spoke chunks (WI-0097, D-0133):
@@ -614,6 +615,8 @@ def recon_dataobj(fid_fobj,
         for lo, hi in ranges:
             k = _read_chunk(fid_fobj, spoke_bytes * (hi - lo), fid_dtype,
                             (2, n_points, n_receivers, hi - lo))
+            if physio is not None:
+                physio.feed(n * n_pro + lo, k)      # raw rows of the pass itself (physio.py)
             if phase_factor is not None:
                 k = k * phase_factor[lo:hi][:, None, :]
             k = k[..., ignore_samples:n_stop]

@@ -3,6 +3,14 @@
 - fix: NIfTI time step for repetition frames. `pixdim[4]` is now `NPro` x TR (for example 180 s for 288,000
   spokes at 0.625 ms) when each frame is one repetition; it stayed at 1.0 before. Frame modes are unchanged.
 
+- `physio` (`off`, `on`; default `off`), `physio_n_inner`, `physio_resp_band`, `physio_cardiac_band`,
+  `physio_window_s`, `physio_pca`, `physio_prefix` (`physio.py`): respiration and heart rate from the innermost
+  spoke samples, taken from the reconstruction's own chunked FID pass (no second read; a recon cache that already
+  exists costs one read of the FID). The direction-fixed part is removed by the per-position mean over the
+  repetitions; `convert` writes `<prefix>_physio.tsv.gz` (`time_s`, `respiratory`, `cardiac`, `quality`, no
+  header) and `<prefix>_physio.json`. None of these keys is in the recon cache key; `physio=off` leaves images
+  and cache entries unchanged and `physio=on` leaves the images unchanged.
+
 New options for event-related golden scans (the peri-event work is by Tzu-Hao Chao; the review fixes below are
 on top of it). Details and equations: `docs/technical-note.md`, section 10.1.
 
