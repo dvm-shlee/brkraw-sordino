@@ -10,6 +10,10 @@
   repetitions; `convert` writes `<prefix>_physio.tsv.gz` (`time_s`, `respiratory`, `cardiac`, `quality`, no
   header) and `<prefix>_physio.json`. None of these keys is in the recon cache key; `physio=off` leaves images
   and cache entries unchanged and `physio=on` leaves the images unchanged.
+- `physio_traj_period` (`auto`, `off`, or spokes; default `auto`): the cardiac trace of golden scans carried a
+  line at 10 Hz (and 5 Hz) from the subset sweep of the spoke order (160 spokes x 0.625 ms = 100 ms). `auto`
+  subtracts, per repetition, the mean of every position of a two-subset cycle before the band-pass; `off`
+  keeps the previous traces. Images and the recon cache are unchanged.
 
 New options for event-related golden scans (the peri-event work is by Tzu-Hao Chao; the review fixes below are
 on top of it). Details and equations: `docs/technical-note.md`, section 10.1.

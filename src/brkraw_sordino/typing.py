@@ -67,6 +67,7 @@ class Options:
     physio_window_s: str = "3,1"
     physio_pca: bool = True
     physio_prefix: Optional[str] = None
+    physio_traj_period: str = "auto"      # "auto", "off" or spokes of the trajectory period to remove
 
 
 __all__ = [

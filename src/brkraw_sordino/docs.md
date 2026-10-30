@@ -44,6 +44,8 @@ physio options (side file; not in the cache key):
   physio_window_s=3,1        rate window in s: respiration,cardiac
   physio_pca=true            PCA trace per band (false: mean)
   physio_prefix=null         output prefix (null: <cache_dir>/scan<id>)
+  physio_traj_period=auto    trajectory periodicity removed from the traces: auto (2 x method subset
+                             of a golden scan), off, or a number of spokes
   writes <prefix>_physio.tsv.gz (+ .json): time_s,respiratory,cardiac,quality
 
 read-time options (not in the cache key):

@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 #: Option names of this module; they are not in the recon cache key (a side file only).
 PHYSIO_KEYS = ("physio", "physio_n_inner", "physio_resp_band", "physio_cardiac_band",
-               "physio_window_s", "physio_pca", "physio_prefix")
+               "physio_window_s", "physio_pca", "physio_prefix", "physio_traj_period")
 
 DEFAULT_N_INNER = 6
 DEFAULT_RESP_BAND = "0.5,5"
@@ -54,6 +54,47 @@ def parse_physio(value: Any) -> str:
     if text in ("on", "true", "1", "yes"):
         return "on"
     raise ValueError(f"sordino: physio must be off or on, not {value!r}")
+
+
+def parse_traj_period(value: Any) -> str:
+    """``auto`` (twice the method subset of a golden scan), ``off`` or a period in spokes (an integer >= 2)."""
+    if value is None:
+        return "auto"
+    text = str(value).strip().lower()
+    if text in ("auto", "off"):
+        return text
+    if text in ("false", "0", "no"):
+        return "off"
+    if text in ("true", "yes", "on"):
+        return "auto"
+    try:
+        n = int(text) if not isinstance(value, bool) else -1
+    except ValueError:
+        n = -1
+    if n < 2:
+        raise ValueError(f"sordino: physio_traj_period must be auto, off or a number of spokes >= 2, "
+                         f"not {value!r}")
+    return str(n)
+
+
+def trajectory_period(options, traj_unit: Optional[int], npro: int) -> Optional[int]:
+    """Spokes of the trajectory periodicity to remove from the features, or None.
+
+    Cause (golden scans): the direction list is cut into subsets of ``NGoldenSpokesPerSubset`` spokes and
+    every subset sweeps the sphere in z-stacks, north to south in even subsets and south to north in odd
+    ones. The innermost samples depend on the direction (ramp phase, coil geometry), so the
+    direction-dependent part of a spoke repeats with the subset period and, with the alternating sweep,
+    with two subsets. With the 0.625 ms spoke time a subset of 160 spokes is 160 x 0.625 ms = 100 ms =
+    10 Hz, two subsets are 320 spokes = 200 ms = 5 Hz: the two frequencies the cardiac peak sits on in the
+    scans read. The per-position mean over the repetitions removes only the part that is the same in every
+    repetition; a slow change from repetition to repetition (drift, breathing, posture) multiplies the
+    direction pattern and leaves the periodic line in the residual.
+    """
+    mode = getattr(options, "physio_traj_period", "auto")
+    if mode == "off":
+        return None
+    period = int(mode) if mode != "auto" else (2 * int(traj_unit) if traj_unit and int(traj_unit) > 1 else 0)
+    return period if 2 <= period < int(npro) else None
 
 
 def parse_n_inner(value: Any) -> int:
@@ -151,7 +192,8 @@ class Collector:
 
     def __init__(self, npro: int, n_rep: int, n_rx: int, tr_ms: float, options, *, phase_factor=None,
                  ignore_samples: int = 1, bandwidth=None, over_sampling=None, n_points: Optional[int] = None,
-                 censor: Optional[np.ndarray] = None, correct_ramptime: Optional[bool] = None):
+                 censor: Optional[np.ndarray] = None, correct_ramptime: Optional[bool] = None,
+                 traj_unit: Optional[int] = None):
         if tr_ms in (None, 0, 0.0):
             raise ValueError("sordino: physio needs the repetition time of the spokes "
                              "(RepetitionTime_ms) to give the traces a time axis")
@@ -176,6 +218,7 @@ class Collector:
             raise ValueError(f"physio: the censor has {np.asarray(censor).size} values, the stream {total}")
         self.censor = None if censor is None else np.asarray(censor, dtype=bool).reshape(-1)
         self.correct_ramptime = correct_ramptime
+        self.traj_period = trajectory_period(options, traj_unit, self.npro)
         self.store = np.zeros((total, self.n_rx, self.n_inner), dtype=np.complex64)
         self.seen = np.zeros(total, dtype=bool)
         logger.info("physio: collecting %s inner sample(s) of %s spokes and %s channel(s) (%.2f GiB).",
@@ -214,7 +257,8 @@ class Collector:
         feats = _features(self.store, use, self.n_rep, self.npro)
         self.store = None
         return analyse(feats, use, self.tr_s, self.options, n_rep=self.n_rep, npro=self.npro,
-                       ignore_samples=self.ign, n_rx=self.n_rx, correct_ramptime=self.correct_ramptime)
+                       ignore_samples=self.ign, n_rx=self.n_rx, correct_ramptime=self.correct_ramptime,
+                       traj_period=self.traj_period)
 
 
 def _features(store: np.ndarray, use: np.ndarray, n_rep: int, npro: int) -> np.ndarray:
@@ -239,6 +283,26 @@ def _features(store: np.ndarray, use: np.ndarray, n_rep: int, npro: int) -> np.n
         out[r, :, 0] = np.where(good, d.real, 0)
         out[r, :, 1] = np.where(good, d.imag / safe, 0)
     return out.reshape(n_rep * npro, 2 * n_rx * n_inner)
+
+
+def _remove_period(x: np.ndarray, use: np.ndarray, n_rep: int, npro: int, period: int) -> None:
+    """Subtract, in place and per repetition, the mean of every position of a ``period``-spoke cycle.
+
+    Removes the trajectory periodicity (``trajectory_period``) and its harmonics, a comb of notches at
+    multiples of 1 / (period x TR). A rhythm that is not such a multiple averages out over the many cycles
+    of a repetition (288000 / 320 = 900 for the usual scan). Unusable spokes stay 0.
+    """
+    phase = np.arange(npro) % period
+    u = use.reshape(n_rep, npro)
+    for r in range(n_rep):
+        w = u[r].astype(np.float64)
+        cnt = np.bincount(phase, weights=w, minlength=period)
+        seen = cnt > 0
+        for j in range(x.shape[1]):
+            col = x[r * npro:(r + 1) * npro, j]
+            mean = np.bincount(phase, weights=col.astype(np.float64) * w, minlength=period)
+            mean = np.where(seen, mean / np.maximum(cnt, 1), 0.0)
+            col -= (mean[phase] * w).astype(np.float32)
 
 
 def _band_trace(x: np.ndarray, use: np.ndarray, fs: float, band: Tuple[float, float], pca: bool):
@@ -322,9 +386,15 @@ def _summary(rate: np.ndarray, qual: np.ndarray) -> Dict[str, Any]:
 
 
 def analyse(feats: np.ndarray, use: np.ndarray, tr_s: float, options, *, n_rep: int, npro: int,
-            ignore_samples: int, n_rx: int, correct_ramptime=None) -> PhysioResult:
-    """Traces, rates and quality from the (N, F) features (see ``Collector.finish``)."""
+            ignore_samples: int, n_rx: int, correct_ramptime=None,
+            traj_period: Optional[int] = None) -> PhysioResult:
+    """Traces, rates and quality from the (N, F) features (see ``Collector.finish``).
+
+    ``traj_period`` (spokes) removes the trajectory periodicity from the features before the band-pass.
+    """
     fs = 1.0 / tr_s
+    if traj_period:
+        _remove_period(feats, use, int(n_rep), int(npro), int(traj_period))
     (rband, cband), (rwin, cwin) = bands(options), windows(options)
     pca = bool(options.physio_pca)
     resp, rinfo = _band_trace(feats, use, fs, rband, pca)
@@ -350,6 +420,7 @@ def analyse(feats: np.ndarray, use: np.ndarray, tr_s: float, options, *, n_rep: 
                        "power, times the usable-spoke fraction of the window; linear in between",
             "repetitions": int(n_rep), "spokes_per_repetition": int(npro),
             "spokes_unusable": int((~use).sum()), "correct_ramptime": correct_ramptime,
+            "trajectory_period_spokes": int(traj_period) if traj_period else None,
             "respiratory_trace": rinfo, "cardiac_trace": cinfo,
         },
         "RespiratoryRate": _summary(rrate, rq),
@@ -363,7 +434,7 @@ def extract_stream(fid_fobj, recon_info: Dict[str, Any], options, n_rep: int, *,
                    chunk_spokes: Optional[int] = None, censor: Optional[np.ndarray] = None) -> PhysioResult:
     """The physio traces from one read of the FID, without reconstruction (used when the images are
     already cached; a reconstruction feeds its own ``Collector`` instead)."""
-    from . import serial
+    from . import golden, serial
     from .recon import _read_chunk, parse_fid_info
 
     fid_shape, fid_dtype = parse_fid_info(recon_info)
@@ -373,7 +444,8 @@ def extract_stream(fid_fobj, recon_info: Dict[str, Any], options, n_rep: int, *,
     col = Collector(npro, n_rep, n_rx, recon_info.get("RepetitionTime_ms"), options, phase_factor=phase_factor,
                     ignore_samples=ign, bandwidth=recon_info.get("EffBandwidth_Hz"),
                     over_sampling=recon_info.get("OverSampling"), n_points=n_points, censor=censor,
-                    correct_ramptime=getattr(options, "correct_ramptime", None))
+                    correct_ramptime=getattr(options, "correct_ramptime", None),
+                    traj_unit=golden.golden_unit(recon_info))
     fid_fobj.seek((getattr(options, "offset", None) or 0) * spoke_bytes * npro)
     for r in range(int(n_rep)):
         for lo, hi in serial.spoke_ranges(npro, chunk_spokes or 4096):

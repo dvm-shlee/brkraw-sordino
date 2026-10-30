@@ -332,3 +332,53 @@ def test_off_mode_matches_the_pre_change_code(tmp_path):
     old_params = base_hook._build_cache_params(_Scan(), None, _Fid(), opt, _recon_info(1))
     assert new_params["options"] == old_params["options"]
     assert recon.build_recon_cache_path(tmp_path, new_params) == recon.build_recon_cache_path(tmp_path, old_params)
+
+
+# ------------------------------------------------------------------ trajectory periodicity
+UNIT = 80                          # spokes of a method subset in the synthetic scan (period 2 x 80 = 160 spokes = 10 Hz)
+SLOW_CARD_HZ = 7.3                 # not a multiple of 1600 / 160 Hz
+
+
+def _periodic_inner(seed=5):
+    """Cardiac modulation plus a drift that changes from repetition to repetition and multiplies a direction
+    pattern with a period of 160 spokes (100 ms at 1600 Hz): the residual carries a 10 Hz line."""
+    rng = np.random.default_rng(seed)
+    a = np.arange(NPRO)
+    base = (3.0 + 0.1 * (rng.standard_normal((NPRO, N_RX, N_INNER)) + 1j * rng.standard_normal((NPRO, N_RX, N_INNER))))
+    base *= (1 + 0.8 * np.cos(2 * np.pi * a / (2 * UNIT)))[:, None, None]
+    t = np.arange(N_REP * NPRO) * TR_MS * 1e-3
+    drift = np.repeat(0.3 * rng.standard_normal(N_REP), NPRO)
+    m = 0.04 * np.sin(2 * np.pi * SLOW_CARD_HZ * t + 0.7)
+    v = np.tile(base, (N_REP, 1, 1)) * (1 + drift + m)[:, None, None]
+    return v + SIGMA * (rng.standard_normal(v.shape) + 1j * rng.standard_normal(v.shape))
+
+
+def _collect_unit(options, inner, unit=UNIT):
+    col = physio.Collector(NPRO, N_REP, N_RX, TR_MS, options, ignore_samples=1,
+                           n_points=inner.shape[2] + 3, traj_unit=unit)
+    raw = _raw(inner)
+    for lo in range(0, raw.shape[0], 1500):
+        col.feed(lo, raw[lo:lo + 1500])
+    return col
+
+
+def test_trajectory_periodicity_is_removed_before_the_cardiac_rate(tmp_path):
+    inner = _periodic_inner()
+    old = _collect_unit(_options(tmp_path, physio_traj_period="off"), inner).finish()
+    assert abs(old.meta["CardiacRate"]["median_hz"] - 10.0) < 0.3          # the artefact: the 10 Hz line wins
+    assert old.meta["Method"]["trajectory_period_spokes"] is None
+    new = _collect_unit(_options(tmp_path), inner).finish()                # auto: 2 x unit = 160 spokes
+    assert new.meta["Method"]["trajectory_period_spokes"] == 2 * UNIT
+    assert abs(new.meta["CardiacRate"]["median_hz"] - SLOW_CARD_HZ) < 0.3
+
+
+def test_trajectory_period_option_and_no_unit(tmp_path):
+    assert physio.parse_traj_period(None) == "auto" and physio.parse_traj_period(" OFF ") == "off"
+    assert physio.parse_traj_period(160) == "160"
+    for bad in ("1", "x", -3, "1.5"):
+        with pytest.raises(ValueError, match="physio_traj_period"):
+            physio.parse_traj_period(bad)
+    assert _options(tmp_path).physio_traj_period == "auto"
+    inner = _periodic_inner()
+    assert _collect_unit(_options(tmp_path), inner, unit=None).traj_period is None      # no golden unit: nothing removed
+    assert _collect_unit(_options(tmp_path, physio_traj_period=160), inner, unit=None).traj_period == 160
