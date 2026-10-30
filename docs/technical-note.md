@@ -788,6 +788,7 @@ directions come from the method parameter `TrajectoryMode` (`Default`, `GoldenSa
 | `physio_window_s` | `3,1` | Estimation windows in seconds, `respiration,cardiac`. |
 | `physio_pca` | `true` | Combine the inner samples by principal component (true) or by their mean. |
 | `physio_prefix` | `null` | Path prefix of the side files; default derived from the scan. |
+| `physio_traj_period` | `auto` | Trajectory periodicity removed from the features before the rate estimate: `auto` (twice the method subset of a golden scan, none otherwise), `off`, or a period in spokes. Per repetition, the mean of every position of the cycle is subtracted (a notch comb at multiples of 1/(period x TR); 320 spokes at 0.625 ms notch 5, 10, 15 Hz). |
 
 The static image of the `rep_pattern: model` frames has its own options, `frame_static`, `frame_static_iter` and `frame_static_lambda` (section 10.4; table above).
 

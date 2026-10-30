@@ -207,6 +207,7 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         physio_window_s=physio.parse_window(kwargs.get("physio_window_s")),
         physio_pca=parse_bool("physio_pca", kwargs.get("physio_pca", True)),
         physio_prefix=(str(kwargs["physio_prefix"]) if kwargs.get("physio_prefix") else None),
+        physio_traj_period=physio.parse_traj_period(kwargs.get("physio_traj_period")),
     )
 
 
@@ -929,7 +930,7 @@ def _physio_collector(scan: Any, plan: Dict[str, Any], options: Options, recon_i
         npro, n_rep, n_rx, recon_info.get("RepetitionTime_ms"), options, phase_factor=phase_factor,
         ignore_samples=options.ignore_samples or 1, bandwidth=recon_info.get("EffBandwidth_Hz"),
         over_sampling=recon_info.get("OverSampling"), n_points=n_points, censor=censor,
-        correct_ramptime=options.correct_ramptime)
+        correct_ramptime=options.correct_ramptime, traj_unit=golden.golden_unit(recon_info))
 
 
 def _physio_prefix(scan: Any, plan: Dict[str, Any], options: Options) -> str:
