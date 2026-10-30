@@ -282,3 +282,53 @@ def test_the_physio_pass_equals_the_stand_alone_read(tmp_path):
     assert np.array_equal(ref.respiratory, alone.respiratory)
     assert np.array_equal(ref.cardiac, alone.cardiac)
     assert np.array_equal(ref.quality, alone.quality)
+
+
+# ------------------------------------------------------------------ pre-change identity
+def _base_module(name):
+    """A module of the code before the physio change, loaded from git next to the current package."""
+    import importlib.util
+    import pathlib
+    import subprocess
+    import sys
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    base = subprocess.run(["git", "merge-base", "HEAD", "integrate/golden-sordino"], cwd=root,
+                          capture_output=True, text=True)
+    rev = base.stdout.strip()
+    if base.returncode or not rev:
+        pytest.skip("no integration branch to take the pre-change code from")
+    shown = subprocess.run(["git", "show", f"{rev}:src/brkraw_sordino/{name}.py"], cwd=root,
+                           capture_output=True, text=True)
+    if shown.returncode or "physio" in shown.stdout.split("def ", 1)[0] and name == "frames":
+        pytest.skip("the integration branch already holds the physio change")
+    spec = importlib.util.spec_from_loader(f"brkraw_sordino._base_{name}", loader=None)
+    mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = "brkraw_sordino"
+    sys.modules[spec.name] = mod
+    exec(compile(shown.stdout, f"<base {name}>", "exec"), mod.__dict__)
+    return mod
+
+
+def test_off_mode_matches_the_pre_change_code(tmp_path):
+    from test_rep_pattern import _samples, _phantom
+
+    base_frames = _base_module("frames")
+    base_hook = _base_module("hook")
+    info = dict(_golden_info(3), RepetitionTime_ms=1.0)
+    x = _phantom()
+    samples = _samples(tmp_path, info, [x, 1.1 * x, 0.9 * x], noise=2.0e4)
+    options = _opts(tmp_path, frame_spokes=100)
+    plan = base_frames.make_plan(info, options)
+    out = io.BytesIO()
+    base_frames.recon_frames(io.BytesIO(_encode(samples)), trajectory_rows(info, options), info, out, options,
+                             plan, phase_factor=phase_correction_rows(info, options, N_POINTS),
+                             chunk_spokes=200)
+    now, *_ = _frames_run(tmp_path / "now")
+    assert now == out.getvalue()                       # off-mode images: the same bytes as before the change
+    # off-mode cache entry: the keyed options and the path are those of the pre-change code
+    opt = hook._build_options({"cache_dir": str(tmp_path)})
+    new_params = hook._build_cache_params(_Scan(), None, _Fid(), opt, _recon_info(1))
+    old_params = base_hook._build_cache_params(_Scan(), None, _Fid(), opt, _recon_info(1))
+    assert new_params["options"] == old_params["options"]
+    assert recon.build_recon_cache_path(tmp_path, new_params) == recon.build_recon_cache_path(tmp_path, old_params)
