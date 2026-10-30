@@ -21,8 +21,8 @@ from test_hook_read import _Fid, _Scan, _recon_info
 from test_peri_event_corrections import _encode
 from test_serial_recon import N_POINTS
 
-N_REP, NPRO, N_RX, N_INNER = 8, 4000, 2, 4
-TR_MS = 0.625                      # 1600 Hz, a repetition of 2.5 s
+N_REP, NPRO, N_RX, N_INNER = 16, 4000, 2, 4
+TR_MS = 0.625                      # 1600 Hz, a repetition of 2.5 s (16 repetitions: the mean over repetitions carries 1/16 of the modulation)
 SIGMA = 0.02                       # noise per real or imaginary part
 RESP_HZ, CARD_HZ = 3.1234, 10.37   # not locked to the repetition period (2.5 s)
 WINDOWS = "2,0.5"
@@ -108,7 +108,7 @@ def test_physio_keys_are_not_in_the_recon_cache_key(tmp_path):
     plain = params()
     on = params(physio="on", physio_n_inner=8, physio_resp_band="1,4", physio_cardiac_band="6,12",
                 physio_window_s="4,2", physio_pca="false", physio_prefix=str(tmp_path / "x"))
-    assert on == plain
+    assert on["options"] == plain["options"]            # recon_info holds arrays: compare the keyed options and the hashed path
     assert not [k for k in plain["options"] if k.startswith("physio")]
     assert set(physio.PHYSIO_KEYS) <= set(frames.FRAME_KEYS)
     assert recon.build_recon_cache_path(tmp_path, on) == recon.build_recon_cache_path(tmp_path, plain)

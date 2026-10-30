@@ -784,19 +784,6 @@ directions come from the method parameter `TrajectoryMode` (`Default`, `GoldenSa
 
 The static image of the `rep_pattern: model` frames has its own options, `frame_static`, `frame_static_iter` and `frame_static_lambda` (section 10.4; table above).
 
-Respiration and heart rate from the spokes (`physio.py`): a side file written in the same FID pass; none of these
-options is part of the recon cache key, and `physio: off` leaves images and cache entries as before.
-
-| Option | Default | Meaning |
-| --- | --- | --- |
-| `physio` | `off` | `off` or `on`. With `on`, the innermost spoke samples are read in the reconstruction's own chunked FID pass (a recon cache that already exists costs one read of the FID without reconstruction) and `<prefix>_physio.tsv.gz` (columns `time_s`, `respiratory`, `cardiac`, `quality`; no header; tab separated; one row per spoke) and `<prefix>_physio.json` (`SamplingFrequency`, `StartTime`, `Columns`, method parameters, rate summaries) are written by `convert`. Needs 2 or more repetitions and `RepetitionTime_ms`. |
-| `physio_n_inner` | `6` | Innermost samples per spoke, counted after the `ignore_samples` trim (a positive integer; the FID needs that many samples past the trim). |
-| `physio_resp_band` | `0.5,5` | Respiratory band `low,high` in Hz. |
-| `physio_cardiac_band` | `5,15` | Cardiac band `low,high` in Hz; the upper edge must be below half the spoke rate. |
-| `physio_window_s` | `3,1` | Sliding-window length in seconds, `respiration,cardiac` (one number serves both); stepped by half a window. |
-| `physio_pca` | `true` | `true` reduces the band-passed channel and sample features to one trace per band by the first principal component, `false` by a sign-aligned mean. |
-| `physio_prefix` | `null` | Output path prefix; `null` writes next to the caches, `<cache_dir>/scan<id>` (`_reco<id>` with a reco). |
-
 Read-time options (they choose what is returned from the cache and are not part of its key):
 
 | Option | Default | Meaning |
