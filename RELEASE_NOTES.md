@@ -28,6 +28,11 @@
   subtracts, per repetition, the mean of every position of a two-subset cycle before the band-pass; `off`
   keeps the previous traces. Images and the recon cache are unchanged. Details: `docs/technical-note.md`,
   section 10.5.
+- `physio_traj_window` (seconds or `off`; default `1`): the cycle mean of `physio_traj_period` is now local, the mean
+  of the same position over the cycles within the window, so a pattern whose amplitude drifts within a repetition
+  is removed too (the per-repetition mean left the 10 Hz line as the top cardiac peak in real scans). `off` keeps
+  the per-repetition mean. Cost stays linear in spokes x features. Images and the recon cache are unchanged; the
+  key is not in the cache key. Details: `docs/technical-note.md`, section 10.5.
 
 New options for event-related golden scans (the peri-event work is by Tzu-Hao Chao; the review fixes below are
 on top of it). Details and equations: `docs/technical-note.md`, section 10.1.

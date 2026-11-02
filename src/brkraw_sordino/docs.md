@@ -45,14 +45,14 @@ side-file options (not in cache key):
   physio_pca=true            PCA trace per band (false: mean)
   physio_prefix=null         output prefix; writes <prefix>_physio.tsv.gz/.json
   physio_traj_period=auto    trajectory period removed: auto, off or spokes
+  physio_traj_window=1       local cycle mean in s (off: whole repetition)
   frame_export=off           complex: complex and pure-noise frames, k sigma
   frame_export_prefix=null   output prefix of <prefix>_frames_*, _noise_frames_*
-
 read-time options (not in the cache key):
   frames=null                frames to return: int, list or "start:stop:step"
   axis=null                  frame axis: 3, -1, cycle or repetition
   max_memory_gb=auto         size-check limit (auto: half of physical memory)
   allow_short_fid=true       short FID: reconstruct the complete frames only
 
-ZTE-mode scans of sordino_260801: set correct_ramptime=false yourself.
-Details, caches, sizes: docs/technical-note.md, Appendix A (repository).
+ZTE scans of sordino_260801: set correct_ramptime=false yourself.
+Details: docs/technical-note.md, Appendix A (repository).
