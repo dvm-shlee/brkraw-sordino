@@ -346,3 +346,17 @@ def test_hook_adds_the_noise_frames_to_images_cached_without_the_option(tmp_path
     assert calls == [True]                                              # only the noise pass ran
     assert cache.read_bytes() == before
     assert (tmp_path / "o" / "c_noise_frames_imag.nii.gz").exists()
+
+
+def test_noise_frames_take_the_data_frames_cg_gain(tmp_path):
+    # frame_static='cg': the residual term of a data frame is divided by the gain c of the all-spoke solve
+    # (frames.py); the noise frames are that residual term alone, so they must carry the same 1 / c against
+    # the adjoint noise frames: a constant, positive factor over every frame and voxel, different from 1
+    info, samples = _noisy(tmp_path / "s")
+    _, plan, adj, _, _ = _noise_run(tmp_path / "a", info, samples)
+    _, plan_cg, cg, _, _ = _noise_run(tmp_path / "c", info, samples,
+                                      rep_pattern="model", frame_static="cg")
+    assert plan_cg.n_frames == plan.n_frames
+    ratio = np.vdot(adj, cg).real / np.vdot(adj, adj).real          # least-squares factor
+    assert ratio > 0 and abs(ratio - 1.0) > 1e-4
+    assert np.linalg.norm(cg - ratio * adj) < 1e-4 * np.linalg.norm(cg)

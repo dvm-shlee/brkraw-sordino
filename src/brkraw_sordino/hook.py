@@ -983,7 +983,8 @@ def _reconstruct_noise_frames(fid_fobj, traj, recon_info, options, frame_plan, n
             os.remove(tmp)
         except OSError:
             pass
-    noise_options = replace(options, rep_pattern="none", frame_static="adjoint")
+    # frame_static='cg' keeps its model solve: the noise frames need the data frames' gain 1 / c
+    noise_options = options if options.frame_static == "cg" else replace(options, rep_pattern="none")
     stats: Dict[str, Any] = {}
     logger.info("frame_export: reconstructing the pure-noise frames (%s repetitions).", frame_plan.n_rep)
     with open(tmp, "w+b") as handle:

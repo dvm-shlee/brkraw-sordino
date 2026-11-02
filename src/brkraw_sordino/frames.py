@@ -618,7 +618,9 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
     weights, scales, frame plan, phase factor, off-resonance) is that of the data frames. No centre
     is estimated (the predicted centre samples carry no noise). The dict gets the k-space noise
     statistics (``frameexport.ksigma``), measured from the same residuals with one more read of the FID.
-    ``options`` must have ``rep_pattern='none'`` and ``frame_static='adjoint'``.
+    With ``frame_static='cg'`` (``rep_pattern='model'``) the data frames' residual term carries the gain 1 / c of
+    the all-spoke solve; the noise frames run the same solve on the raw data, take the same gain and carry no
+    static-image term. Otherwise ``options`` must have ``rep_pattern='none'``.
     """
     from . import memguard, serial
     from .recon import (_row_source, correct_offreso, grid_shift, grid_shift_factor, parse_fid_info,
@@ -626,10 +628,12 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
 
     mode = getattr(options, "rep_pattern", "none")
     noise = noise_out is not None
-    if noise and (mode != "none" or subtract_rep_mean or spoke_mask is not None or physio is not None
+    noise_cg = noise and getattr(options, "frame_static", "adjoint") == "cg"
+    if noise and ((mode != "none" and not (noise_cg and mode == "model")) or subtract_rep_mean
+                  or spoke_mask is not None or physio is not None
                   or getattr(options, "anat_solver", "adjoint") != "adjoint"):
-        raise ValueError("sordino: the noise frames need rep_pattern='none', no subtract_rep_mean, no spoke "
-                         "mask, no physio collector and anat_solver='adjoint'")
+        raise ValueError("sordino: the noise frames need rep_pattern='none' (or 'model' with frame_static='cg'), "
+                         "no subtract_rep_mean, no spoke mask, no physio collector and anat_solver='adjoint'")
     if noise and plan.n_rep < 2:
         raise ValueError(f"sordino: the noise frames need at least 2 repetitions, this run reads {plan.n_rep}")
     if mode != "none" and subtract_rep_mean:
@@ -642,7 +646,7 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
     static_cg = getattr(options, "frame_static", "adjoint") == "cg"
     if static_cg and mode != "model":
         raise ValueError("sordino: frame_static='cg' needs rep_pattern='model'")
-    need_x = (virtual_traj is not None or mode == "model" or anat) and not noise   # a CG solve on the all-spoke normal operator
+    need_x = (virtual_traj is not None or mode == "model" or anat) and (not noise or noise_cg)   # a CG solve on the all-spoke normal operator
     gain = 1.0          # frame_static='cg': residual term to the units of x_hat (1 / c, technical note 10.4)
     img_fobj.seek(0)
     fid_shape, fid_dtype = parse_fid_info(recon_info)
@@ -804,7 +808,7 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
     preds = None
     xs = None
     x_full = None
-    if (mode != "none" or virtual_traj is not None or anat) and not noise:
+    if (mode != "none" or virtual_traj is not None or anat) and (not noise or noise_cg):
         from .kcentre import k0_iterations
         n_iter = k0_iterations(recon_info)     # N_ITER unless the centre gap is wide (WI-0137)
 
@@ -899,7 +903,7 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
         """What is added to image ``index`` before the output gain: x_full - (s / nf) T x_hat (model),
         x_full (measured). An empty (zero-scale) frame stays zero."""
         scale = plan.scales[index]
-        if mode == "none" or scale == 0.0:
+        if mode == "none" or scale == 0.0 or noise:
             return None
         if mode == "measured":
             return x_full
