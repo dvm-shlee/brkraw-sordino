@@ -438,6 +438,9 @@ one repetition per frame (`frame_spokes=repetition`, or no frame option) gives `
 spokes at 0.625 ms is 180 s; a single 3D image keeps the brkraw value. Without a TR in the header it is left
 as brkraw wrote it.
 
+**Subsections.** 10.1 peri-event frames; 10.2 repetition-pattern removal; 10.3 anatomical reference from all
+spokes; 10.4 CG static image in the frames; 10.5 physiological traces from the spokes (not an image).
+
 **Size.** The recon cache holds one complex128 volume per frame (and channel):
 $16\,n_{\mathrm{ch}}M_1M_2M_3$ bytes per frame. A sliding window also holds one copy of the running sum per open frame
 start. The size check runs before anything is reconstructed and stops with the sizes.
@@ -638,6 +641,85 @@ run, $\lambda$ and the final relative residual (worst channel). The key gets `{"
 only when `frame_static` is not `adjoint`. The size estimate adds five volumes per channel (the CG work
 volumes, as `anat_cg` in section 10.3). With `estimate_k0` the predicted centre samples of every repetition
 join the CG solve and every frame's normal operator, as in section 10.3.
+
+### 10.5 Physiological traces from the spokes (`physio=on`; `physio.py`)
+
+Respiration and heart rate are estimated from the data of the scan itself; no sensor is read. The traces
+are a side output: images and the recon cache are unchanged, and none of the `physio` options is in the cache
+key (`physio.PHYSIO_KEYS`).
+
+**Source and rate.** The k-space centre of every spoke: the `physio_n_inner` samples nearest to $k=0$ after the
+`ignore_samples` trim, per channel (`Collector.feed`). The phase factor and the off-resonance correction are
+applied as in the reconstruction. Read in stream order they are one complex sample per spoke and channel, so
+the sampling rate of the traces is the spoke rate $f_s = 1/\mathrm{TR}_{\mathrm{spoke}}$
+(`RepetitionTime_ms`; 1600 Hz at 0.625 ms; `analyse`). The collector is fed by the reconstruction's own
+chunked FID pass (no second read); when the images are cached, `extract_stream` reads the FID once for the
+traces only. Spokes never read, or marked 0 in `peri_censor`, are unusable (`Collector.usable`). At least
+2 repetitions are needed (`Collector.__init__`).
+
+**Features.** The direction of a spoke changes the centre samples (ramp phase, coil geometry), but the direction
+list repeats in every repetition. Per spoke position the mean $\bar v$ over the usable repetitions is therefore
+the direction-fixed part, and the residual $d = v - \bar v$ holds physiology, bulk motion and noise. Per channel
+and inner sample two real features are formed, the change along the mean sample
+($\mathrm{Re}\,(d\,\bar v^{*})/|\bar v|$, magnitude) and across it ($\mathrm{Im}\,(d\,\bar v^{*})/|\bar v|^{2}$,
+phase in rad); $|\bar v|$ is floored at 10 % of its mean. A position seen once has no residual and is 0
+(`_features`).
+
+**Trajectory-period removal (`physio_traj_period`).** The per-position mean removes only the part that is the
+same in every repetition. A golden scan cuts the direction list into subsets of `NGoldenSpokesPerSubset`
+spokes, and every subset sweeps the sphere in z-stacks, north to south in even subsets and south to north in
+odd ones. The centre samples depend on the direction, so the direction-dependent part repeats with two
+subsets, and a slow change from repetition to repetition (drift, breathing, posture) multiplies that pattern
+and leaves a line in the residual. With 160 spokes per subset at 0.625 ms the subset is 100 ms (10 Hz), the
+two-subset cycle 320 spokes = 200 ms (5 Hz): a line at 1/(cycle) and its multiples, which falls in the cardiac
+band. Per repetition and per feature, the mean of every position of the cycle
+($j = g \bmod P$, $P$ the period in spokes) is subtracted (`_remove_period`), a comb of notches at multiples
+of $1/(P\,\mathrm{TR})$. A rhythm that is not such a multiple averages out over the cycles of a repetition
+(288,000 / 320 = 900 for the usual scan). `auto` takes $P = 2 N_{\mathrm{sub}}$ for a golden scan and no removal
+otherwise; a number sets $P$ in spokes; `off` keeps the previous traces. $P$ must be at least 2 and below
+`NPro` (`trajectory_period`, `parse_traj_period`). The removal runs before the band-pass (`analyse`), and
+the period used is in the sidecar (`trajectory_period_spokes`).
+
+**Traces.** Each band has a zero-phase Butterworth band-pass of order 4 (`_band_trace`; `scipy.signal.butter`
+and `sosfiltfilt`); a band edge at or above the Nyquist frequency $f_s/2$ is refused. The filtered features are
+scaled to unit standard deviation over the usable spokes and reduced to one trace: with `physio_pca` the first
+principal component of their covariance (sign fixed so that the largest weight is positive; the sidecar gives
+`explained_variance`), else a mean of the features after aligning their signs to the most correlated one.
+Trace units are arbitrary.
+
+**Rate and quality.** In windows stepped by half a window (`_windowed`), the Hann-tapered, zero-padded spectrum
+of the trace gives the rate as the dominant peak inside the band. The window quality is the power within
+$1.5/T_{\mathrm{win}}$ Hz of the peak over the band power, times the fraction of usable spokes of the window;
+a window with fewer than 50 % usable spokes has no rate and quality 0 (`MIN_USABLE`). The `quality` column is the
+mean of the two band qualities, interpolated to every spoke. The sidecar gives per band the number of windows,
+the usable windows, and the median, 5th and 95th percentile rate (`_summary`).
+
+**Options.**
+
+| Option | Default | Meaning |
+|---|---|---|
+| `physio` | `off` | `off` or `on` (`parse_physio`). |
+| `physio_n_inner` | `6` | Inner samples per spoke, a positive integer (`parse_n_inner`). |
+| `physio_resp_band` | `0.5,5` | Respiration band, Hz, `low,high`, $0<\text{low}<\text{high}$ (`parse_band`). |
+| `physio_cardiac_band` | `5,15` | Cardiac band, Hz (`parse_band`). |
+| `physio_window_s` | `3,1` | Window seconds, `respiration,cardiac`; one number serves both (`parse_window`). |
+| `physio_pca` | `true` | Principal component (true) or sign-aligned mean (false) (`_band_trace`). |
+| `physio_prefix` | `null` | Prefix of the output files; default `<cache_dir>/scan<id>`, with `_reco<id>` when a reco is set (`hook._physio_prefix`). |
+| `physio_traj_period` | `auto` | `auto`, `off`, or a period in spokes (`trajectory_period`). |
+
+**Output (`physio.write`, called by `hook.convert`).** `<prefix>_physio.tsv.gz`: one row per spoke of the
+stream, tab separated, no header, columns `time_s` (spoke index / $f_s$, seconds from the first spoke read),
+`respiratory`, `cardiac` (arbitrary units) and `quality` (0 to 1). `<prefix>_physio.json`: `SamplingFrequency`,
+`StartTime` (0), `Columns`, `Units`, the method record (`Method`: inner samples, channels, features, bands,
+windows, filter, rate and quality definitions, repetitions, unusable spokes, trajectory period, per-trace
+feature count) and the `RespiratoryRate` and `CardiacRate` summaries (`PhysioResult.sidecar`, `analyse`).
+
+**Limits.** The traces are not validated against an external sensor (respiration belt, ECG, pulse oximeter) in
+this package. Rates are estimates of the dominant spectral peak in a window, not beat or breath detections;
+a window whose peak is weak has a low `quality` and its rate should not be trusted. The method assumes that the
+rhythm is not locked to the repetition period (what is the same in every repetition is removed), and it needs
+at least 2 repetitions. Bulk motion is not separated from physiology. A rhythm at a multiple of
+$1/(P\,\mathrm{TR})$ is removed together with the trajectory line.
 
 ## 11. Output scaling (`hook.convert`)
 
