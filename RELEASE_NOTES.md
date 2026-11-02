@@ -32,7 +32,10 @@
   of the same position over the cycles within the window, so a pattern whose amplitude drifts within a repetition
   is removed too (the per-repetition mean left the 10 Hz line as the top cardiac peak in real scans). `off` keeps
   the per-repetition mean. Cost stays linear in spokes x features. Images and the recon cache are unchanged; the
-  key is not in the cache key. Details: `docs/technical-note.md`, section 10.5.
+  key is not in the cache key. Only the cycle-shaped part is subtracted (the position mean minus the mean over
+  all positions of the same window), so respiration and other components slower than the window are kept; the
+  plain local position mean also removed them and moved the respiratory peak. Details: `docs/technical-note.md`,
+  section 10.5.
 
 New options for event-related golden scans (the peri-event work is by Tzu-Hao Chao; the review fixes below are
 on top of it). Details and equations: `docs/technical-note.md`, section 10.1.

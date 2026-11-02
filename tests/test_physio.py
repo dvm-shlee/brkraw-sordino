@@ -405,6 +405,7 @@ def _local_case(seed=1):
         drift = 1 + 0.3 * np.cumsum(rng.standard_normal(LOC_NPRO)) / 60
         reps.append(pattern * (drift + 0.2 * np.sin(2 * np.pi * 0.7 * t + r))[:, None])
     card = np.tile(0.05 * np.sin(2 * np.pi * 7 * t), LOC_REP)[:, None] * np.ones(LOC_F)
+    card = card + np.tile(0.3 * np.sin(2 * np.pi * 0.6 * t), LOC_REP)[:, None] * np.ones(LOC_F)
     noise = 0.01 * rng.standard_normal((LOC_REP * LOC_NPRO, LOC_F))
     return np.vstack(reps), card, noise
 
@@ -427,6 +428,7 @@ def test_local_cycle_mean_removes_the_pattern_lines_and_keeps_the_cardiac_rhythm
     alone = card.astype(np.float32)                                        # the operator is linear
     physio._remove_period(alone, use, LOC_REP, LOC_NPRO, LOC_P, half)
     assert _line_power(alone, 7) >= 0.9 * _line_power(card, 7)
+    assert _line_power(alone, 0.6) >= 0.9 * _line_power(card, 0.6)         # slow physiology stays
     assert elapsed < 5.0                                                   # O(spokes x features)
     # the per-repetition mean leaves the drift behind
     y = before.copy()

@@ -689,7 +689,11 @@ the mean of position $j$ over the cycles $c-h \dots c+h$ of the same repetition 
 $h = \max(1, \mathrm{round}(W / (P\,\mathrm{TR})) \;\mathrm{div}\; 2)$ and $W$ the window in seconds. Unusable spokes are
 left out of every mean and stay 0. Cumulative sums over the cycles give each mean in constant time, so the
 cost is $O(N F)$ for $N$ spokes and $F$ features, with working arrays of the size of one repetition of the
-features (`_remove_period`, `traj_half_window`). The default $W = 1$ s is five cycles of the 320-spoke period
+features (`_remove_period`, `traj_half_window`). Only the cycle-shaped part is subtracted: the local mean over
+all $P$ positions of the same window is taken off the position mean. The position mean of a window also carries
+every component slower than the window (respiration at 0.6-0.8 Hz against a 1 s window), the same at every
+position; subtracting it moved the respiratory peak to 1.2-1.4 Hz in four real scans. What is constant across the
+cycle positions is therefore kept, and the overall local mean is kept on purpose. The default $W = 1$ s is five cycles of the 320-spoke period
 (200 ms): long enough to average a 7 Hz rhythm (a mean of five cycles nulls it, since 7 Hz advances 1.4
 periods per cycle), short enough to follow a drift or a respiratory change of the pattern amplitude (a linear
 change is removed exactly inside the window). A modulation of the pattern near $1/W$ or faster is followed only
