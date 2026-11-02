@@ -681,6 +681,23 @@ otherwise; a number sets $P$ in spokes; `off` keeps the previous traces. $P$ mus
 `NPro` (`trajectory_period`, `parse_traj_period`). The removal runs before the band-pass (`analyse`), and
 the period used is in the sidecar (`trajectory_period_spokes`).
 
+**Local cycle mean (`physio_traj_window`).** A mean over the whole repetition treats the pattern amplitude as
+constant for the repetition (180 s for the usual scan). Observed in four real scans, the amplitude drifts
+faster than that, and with the per-repetition mean the 10 Hz line stayed the top cardiac peak and a 5 Hz line
+remained. The cycle mean is therefore local: for the cycle $c$ and the position $j$, the subtracted value is
+the mean of position $j$ over the cycles $c-h \dots c+h$ of the same repetition (cut at its ends), with
+$h = \max(1, \mathrm{round}(W / (P\,\mathrm{TR})) \;\mathrm{div}\; 2)$ and $W$ the window in seconds. Unusable spokes are
+left out of every mean and stay 0. Cumulative sums over the cycles give each mean in constant time, so the
+cost is $O(N F)$ for $N$ spokes and $F$ features, with working arrays of the size of one repetition of the
+features (`_remove_period`, `traj_half_window`). The default $W = 1$ s is five cycles of the 320-spoke period
+(200 ms): long enough to average a 7 Hz rhythm (a mean of five cycles nulls it, since 7 Hz advances 1.4
+periods per cycle), short enough to follow a drift or a respiratory change of the pattern amplitude (a linear
+change is removed exactly inside the window). A modulation of the pattern near $1/W$ or faster is followed only
+in part and leaves sidebands next to the 5 Hz comb. `off` (or 0) keeps the per-repetition mean. In a synthetic
+check (320-spoke pattern with a drift and a 0.7 Hz modulation of its amplitude, plus a 7 Hz sinusoid) the 5 Hz
+and 10 Hz lines drop by 30 and 34 dB and the 7 Hz sinusoid keeps 99 % of its power. The sidecar gives
+`trajectory_window_s`.
+
 **Traces.** Each band has a zero-phase Butterworth band-pass of order 4 (`_band_trace`; `scipy.signal.butter`
 and `sosfiltfilt`); a band edge at or above the Nyquist frequency $f_s/2$ is refused. The filtered features are
 scaled to unit standard deviation over the usable spokes and reduced to one trace: with `physio_pca` the first
@@ -707,6 +724,7 @@ the usable windows, and the median, 5th and 95th percentile rate (`_summary`).
 | `physio_pca` | `true` | Principal component (true) or sign-aligned mean (false) (`_band_trace`). |
 | `physio_prefix` | `null` | Prefix of the output files; default `<cache_dir>/scan<id>`, with `_reco<id>` when a reco is set (`hook._physio_prefix`). |
 | `physio_traj_period` | `auto` | `auto`, `off`, or a period in spokes (`trajectory_period`). |
+| `physio_traj_window` | `1` | Seconds of the local cycle mean, or `off`/`0` for the mean over the repetition (`parse_traj_window`). |
 
 **Output (`physio.write`, called by `hook.convert`).** `<prefix>_physio.tsv.gz`: one row per spoke of the
 stream, tab separated, no header, columns `time_s` (spoke index / $f_s$, seconds from the first spoke read),
@@ -919,7 +937,8 @@ directions come from the method parameter `TrajectoryMode` (`Default`, `GoldenSa
 | `physio_window_s` | `3,1` | Estimation windows in seconds, `respiration,cardiac`. |
 | `physio_pca` | `true` | Combine the inner samples by principal component (true) or by their mean. |
 | `physio_prefix` | `null` | Path prefix of the side files; default derived from the scan. |
-| `physio_traj_period` | `auto` | Trajectory periodicity removed from the features before the rate estimate: `auto` (twice the method subset of a golden scan, none otherwise), `off`, or a period in spokes. Per repetition, the mean of every position of the cycle is subtracted (a notch comb at multiples of 1/(period x TR); 320 spokes at 0.625 ms notch 5, 10, 15 Hz). |
+| `physio_traj_period` | `auto` | Trajectory periodicity removed from the features before the rate estimate: `auto` (twice the method subset of a golden scan, none otherwise), `off`, or a period in spokes. The mean of every position of the cycle over the neighbouring cycles (`physio_traj_window`) is subtracted (a notch comb at multiples of 1/(period x TR); 320 spokes at 0.625 ms notch 5, 10, 15 Hz). |
+| `physio_traj_window` | `1` | Window in seconds of the local cycle mean (a pattern whose amplitude drifts within a repetition is removed); `off` or `0` keeps the mean over the whole repetition. |
 | `frame_export` | `off` | `off` or `complex`. `complex` writes, beside the magnitude result, the complex frames as float32 real and imaginary NIfTI files, the frame table, the pure-noise frames made from the repetition residuals by the same reconstruction, and the k-space noise level (section 10.6). Needs a frame plan, at least 2 repetitions and one receive channel; refused with `peri_event`, `subtract_rep_mean` and `anat_solver: cg`. Not in the cache key; the noise frames get a cache file of the size of the frame cache beside it. |
 | `frame_export_prefix` | `null` | Path prefix of the frame-export files; default `<cache_dir>/scan<id>`, with `_reco<id>` when a reco is set. Needs `frame_export: complex`. |
 

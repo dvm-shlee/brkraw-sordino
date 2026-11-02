@@ -208,6 +208,7 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         physio_pca=parse_bool("physio_pca", kwargs.get("physio_pca", True)),
         physio_prefix=(str(kwargs["physio_prefix"]) if kwargs.get("physio_prefix") else None),
         physio_traj_period=physio.parse_traj_period(kwargs.get("physio_traj_period")),
+        physio_traj_window=physio.parse_traj_window(kwargs.get("physio_traj_window")),
         frame_export=frameexport.parse_export(kwargs.get("frame_export")),
         frame_export_prefix=(str(kwargs["frame_export_prefix"]) if kwargs.get("frame_export_prefix") else None),
     )

@@ -383,3 +383,98 @@ def test_trajectory_period_option_and_no_unit(tmp_path):
     inner = _periodic_inner()
     assert _collect_unit(_options(tmp_path), inner, unit=None).traj_period is None      # no golden unit: nothing removed
     assert _collect_unit(_options(tmp_path, physio_traj_period=160), inner, unit=None).traj_period == 160
+
+
+# ------------------------------------------------------------------ local cycle mean
+LOC_P, LOC_NPRO, LOC_REP, LOC_F = 320, 16000, 2, 6      # 320-spoke pattern, 10 s per repetition at 1600 Hz
+
+
+def _line_power(x, f, bw=0.25):
+    spec = np.abs(np.fft.rfft(x[:LOC_NPRO], axis=0)) ** 2
+    fr = np.fft.rfftfreq(LOC_NPRO, TR_MS * 1e-3)
+    return spec[(fr > f - bw) & (fr < f + bw)].sum()
+
+
+def _local_case(seed=1):
+    """A 320-spoke pattern whose amplitude carries a slow drift and a 0.7 Hz sinusoid, plus a 7 Hz sinusoid."""
+    rng = np.random.default_rng(seed)
+    t = np.arange(LOC_NPRO) * TR_MS * 1e-3
+    pattern = np.tile(rng.standard_normal((LOC_P, LOC_F)) + 2, (LOC_NPRO // LOC_P, 1))
+    reps = []
+    for r in range(LOC_REP):
+        drift = 1 + 0.3 * np.cumsum(rng.standard_normal(LOC_NPRO)) / 60
+        reps.append(pattern * (drift + 0.2 * np.sin(2 * np.pi * 0.7 * t + r))[:, None])
+    card = np.tile(0.05 * np.sin(2 * np.pi * 7 * t), LOC_REP)[:, None] * np.ones(LOC_F)
+    noise = 0.01 * rng.standard_normal((LOC_REP * LOC_NPRO, LOC_F))
+    return np.vstack(reps), card, noise
+
+
+def test_local_cycle_mean_removes_the_pattern_lines_and_keeps_the_cardiac_rhythm():
+    import time
+
+    pattern, card, noise = _local_case()
+    use = np.ones(LOC_REP * LOC_NPRO, dtype=bool)
+    half = physio.traj_half_window(physio.parse_traj_window(None), LOC_P, TR_MS * 1e-3)
+    assert half == 2                                                       # 1 s = 5 cycles of 200 ms
+    x = (pattern + card + noise).astype(np.float32)
+    before = x.copy()
+    t0 = time.perf_counter()
+    physio._remove_period(x, use, LOC_REP, LOC_NPRO, LOC_P, half)
+    elapsed = time.perf_counter() - t0
+    for hz in (5, 10):
+        drop = 10 * np.log10(_line_power(before, hz) / _line_power(x, hz))
+        assert drop >= 20, (hz, drop)
+    alone = card.astype(np.float32)                                        # the operator is linear
+    physio._remove_period(alone, use, LOC_REP, LOC_NPRO, LOC_P, half)
+    assert _line_power(alone, 7) >= 0.9 * _line_power(card, 7)
+    assert elapsed < 5.0                                                   # O(spokes x features)
+    # the per-repetition mean leaves the drift behind
+    y = before.copy()
+    physio._remove_period(y, use, LOC_REP, LOC_NPRO, LOC_P, 0)
+    assert 10 * np.log10(_line_power(before, 5) / _line_power(y, 5)) < 20
+
+
+def test_local_cycle_mean_leaves_unusable_spokes_out_and_at_zero():
+    pattern, card, noise = _local_case(seed=2)
+    use = np.ones(LOC_REP * LOC_NPRO, dtype=bool)
+    use[500:900] = False
+    use[LOC_NPRO + 40::97] = False
+    x = (pattern + card + noise).astype(np.float32)
+    x[~use] = 0
+    physio._remove_period(x, use, LOC_REP, LOC_NPRO, LOC_P, 2)
+    assert np.all(x[~use] == 0) and np.isfinite(x).all()
+    assert abs(x[use]).mean() < 0.2 * abs(pattern).mean()
+
+
+def test_stationary_pattern_is_removed_by_the_local_mean_as_before(tmp_path):
+    inner = _periodic_inner()
+    for window in ("1", "off"):
+        res = _collect_unit(_options(tmp_path, physio_traj_window=window), inner).finish()
+        assert abs(res.meta["CardiacRate"]["median_hz"] - SLOW_CARD_HZ) < 0.3
+    res = _collect_unit(_options(tmp_path), inner).finish()
+    assert res.meta["Method"]["trajectory_window_s"] == 1.0
+
+
+def test_traj_window_option_and_cache_key(tmp_path):
+    assert physio.parse_traj_window(None) == "1" and physio.parse_traj_window(" OFF ") == "off"
+    assert physio.parse_traj_window(0) == "off" and physio.parse_traj_window(0.5) == "0.5"
+    for bad in ("x", -1, "nan"):
+        with pytest.raises(ValueError, match="physio_traj_window"):
+            physio.parse_traj_window(bad)
+    assert "physio_traj_window" in physio.PHYSIO_KEYS
+    assert physio.traj_half_window("off", 320, 6.25e-4) == 0
+    assert physio.traj_half_window("0.2", 320, 6.25e-4) == 1
+
+
+def test_period_off_matches_the_pre_change_code(tmp_path):
+    base = _base_module("physio")
+    inner = _periodic_inner()
+    new = _collect_unit(_options(tmp_path, physio_traj_period="off"), inner).finish()
+    col = base.Collector(NPRO, N_REP, N_RX, TR_MS, _options(tmp_path, physio_traj_period="off"),
+                         ignore_samples=1, n_points=inner.shape[2] + 3, traj_unit=UNIT)
+    raw = _raw(inner)
+    for lo in range(0, raw.shape[0], 1500):
+        col.feed(lo, raw[lo:lo + 1500])
+    old = col.finish()
+    assert new.cardiac.tobytes() == old.cardiac.tobytes() and new.respiratory.tobytes() == old.respiratory.tobytes()
+    assert new.quality.tobytes() == old.quality.tobytes()

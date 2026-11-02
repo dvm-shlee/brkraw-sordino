@@ -34,11 +34,13 @@ logger = logging.getLogger(__name__)
 
 #: Option names of this module; they are not in the recon cache key (a side file only).
 PHYSIO_KEYS = ("physio", "physio_n_inner", "physio_resp_band", "physio_cardiac_band",
-               "physio_window_s", "physio_pca", "physio_prefix", "physio_traj_period")
+               "physio_window_s", "physio_pca", "physio_prefix", "physio_traj_period",
+               "physio_traj_window")
 
 DEFAULT_N_INNER = 6
 DEFAULT_RESP_BAND = "0.5,5"
 DEFAULT_CARDIAC_BAND = "5,15"
+DEFAULT_TRAJ_WINDOW = "1"       # s: five cycles of the 5 Hz golden-scan period
 DEFAULT_WINDOW_S = "3,1"        # respiration, cardiac (a few periods of each)
 MIN_USABLE = 0.5                # a window with a smaller usable-spoke fraction has quality 0
 COLUMNS = ["time_s", "respiratory", "cardiac", "quality"]
@@ -75,6 +77,24 @@ def parse_traj_period(value: Any) -> str:
         raise ValueError(f"sordino: physio_traj_period must be auto, off or a number of spokes >= 2, "
                          f"not {value!r}")
     return str(n)
+
+
+def parse_traj_window(value: Any) -> str:
+    """``off`` (the per-repetition cycle mean) or the window in seconds (a positive number) of the local mean."""
+    if value is None:
+        return DEFAULT_TRAJ_WINDOW
+    text = str(value).strip().lower()
+    if text in ("off", "false", "no", "0"):
+        return "off"
+    if text in ("true", "yes", "on"):
+        return DEFAULT_TRAJ_WINDOW
+    try:
+        w = float(text) if not isinstance(value, bool) else -1.0
+    except ValueError:
+        w = -1.0
+    if not np.isfinite(w) or w < 0:
+        raise ValueError(f"sordino: physio_traj_window must be off or a window in seconds > 0, not {value!r}")
+    return "off" if w == 0 else f"{w:g}"
 
 
 def trajectory_period(options, traj_unit: Optional[int], npro: int) -> Optional[int]:
@@ -219,6 +239,7 @@ class Collector:
         self.censor = None if censor is None else np.asarray(censor, dtype=bool).reshape(-1)
         self.correct_ramptime = correct_ramptime
         self.traj_period = trajectory_period(options, traj_unit, self.npro)
+        self.traj_window = getattr(options, "physio_traj_window", "off")
         self.store = np.zeros((total, self.n_rx, self.n_inner), dtype=np.complex64)
         self.seen = np.zeros(total, dtype=bool)
         logger.info("physio: collecting %s inner sample(s) of %s spokes and %s channel(s) (%.2f GiB).",
@@ -258,7 +279,7 @@ class Collector:
         self.store = None
         return analyse(feats, use, self.tr_s, self.options, n_rep=self.n_rep, npro=self.npro,
                        ignore_samples=self.ign, n_rx=self.n_rx, correct_ramptime=self.correct_ramptime,
-                       traj_period=self.traj_period)
+                       traj_period=self.traj_period, traj_window=self.traj_window)
 
 
 def _features(store: np.ndarray, use: np.ndarray, n_rep: int, npro: int) -> np.ndarray:
@@ -285,24 +306,58 @@ def _features(store: np.ndarray, use: np.ndarray, n_rep: int, npro: int) -> np.n
     return out.reshape(n_rep * npro, 2 * n_rx * n_inner)
 
 
-def _remove_period(x: np.ndarray, use: np.ndarray, n_rep: int, npro: int, period: int) -> None:
-    """Subtract, in place and per repetition, the mean of every position of a ``period``-spoke cycle.
+def _remove_period(x: np.ndarray, use: np.ndarray, n_rep: int, npro: int, period: int,
+                   half: int = 0) -> None:
+    """Subtract, in place, the mean of every position of a ``period``-spoke cycle.
 
     Removes the trajectory periodicity (``trajectory_period``) and its harmonics, a comb of notches at
-    multiples of 1 / (period x TR). A rhythm that is not such a multiple averages out over the many cycles
-    of a repetition (288000 / 320 = 900 for the usual scan). Unusable spokes stay 0.
+    multiples of 1 / (period x TR). With ``half`` = 0 the mean runs over all cycles of a repetition; a
+    rhythm that is not such a multiple averages out over the many cycles of a repetition (288000 / 320 = 900
+    for the usual scan). With ``half`` >= 1 it is local: for the cycle c the mean of the same position over
+    the cycles c - half .. c + half of the repetition (cut at its ends), so a pattern whose amplitude drifts
+    within a repetition is removed with it. Cumulative sums over the cycles keep the cost at
+    O(spokes x features) and the working arrays at the size of one repetition of the features. Unusable
+    spokes are left out of every mean and stay 0.
     """
-    phase = np.arange(npro) % period
     u = use.reshape(n_rep, npro)
+    if half <= 0:
+        phase = np.arange(npro) % period
+        for r in range(n_rep):
+            w = u[r].astype(np.float64)
+            cnt = np.bincount(phase, weights=w, minlength=period)
+            seen = cnt > 0
+            for j in range(x.shape[1]):
+                col = x[r * npro:(r + 1) * npro, j]
+                mean = np.bincount(phase, weights=col.astype(np.float64) * w, minlength=period)
+                mean = np.where(seen, mean / np.maximum(cnt, 1), 0.0)
+                col -= (mean[phase] * w).astype(np.float32)
+        return
+    ncyc = -(-npro // period)
+    lo = np.clip(np.arange(ncyc) - half, 0, ncyc)
+    hi = np.clip(np.arange(ncyc) + half + 1, 0, ncyc)
+    n_f = x.shape[1]
+    pad = ncyc * period
     for r in range(n_rep):
-        w = u[r].astype(np.float64)
-        cnt = np.bincount(phase, weights=w, minlength=period)
-        seen = cnt > 0
-        for j in range(x.shape[1]):
-            col = x[r * npro:(r + 1) * npro, j]
-            mean = np.bincount(phase, weights=col.astype(np.float64) * w, minlength=period)
-            mean = np.where(seen, mean / np.maximum(cnt, 1), 0.0)
-            col -= (mean[phase] * w).astype(np.float32)
+        w = np.zeros(pad)
+        w[:npro] = u[r]
+        blk = np.zeros((pad, n_f))
+        blk[:npro] = x[r * npro:(r + 1) * npro]
+        blk *= w[:, None]
+        cs = np.zeros((ncyc + 1, period, n_f))
+        np.cumsum(blk.reshape(ncyc, period, n_f), axis=0, out=cs[1:])
+        cc = np.zeros((ncyc + 1, period))
+        np.cumsum(w.reshape(ncyc, period), axis=0, out=cc[1:])
+        mean = (cs[hi] - cs[lo]) / np.maximum(cc[hi] - cc[lo], 1.0)[:, :, None]
+        blk -= mean.reshape(pad, n_f) * w[:, None]
+        x[r * npro:(r + 1) * npro] = blk[:npro].astype(np.float32)
+
+
+def traj_half_window(window: str, period: int, tr_s: float) -> int:
+    """Cycles on each side of the local mean for ``physio_traj_window`` (0 keeps the per-repetition mean)."""
+    if window == "off":
+        return 0
+    cycles = float(window) / (int(period) * float(tr_s))
+    return max(1, int(round(cycles)) // 2)
 
 
 def _band_trace(x: np.ndarray, use: np.ndarray, fs: float, band: Tuple[float, float], pca: bool):
@@ -387,14 +442,17 @@ def _summary(rate: np.ndarray, qual: np.ndarray) -> Dict[str, Any]:
 
 def analyse(feats: np.ndarray, use: np.ndarray, tr_s: float, options, *, n_rep: int, npro: int,
             ignore_samples: int, n_rx: int, correct_ramptime=None,
-            traj_period: Optional[int] = None) -> PhysioResult:
+            traj_period: Optional[int] = None, traj_window: str = "off") -> PhysioResult:
     """Traces, rates and quality from the (N, F) features (see ``Collector.finish``).
 
-    ``traj_period`` (spokes) removes the trajectory periodicity from the features before the band-pass.
+    ``traj_period`` (spokes) removes the trajectory periodicity from the features before the band-pass,
+    by the mean of the same cycle position over the cycles within ``traj_window`` seconds (``off``: over
+    the repetition).
     """
     fs = 1.0 / tr_s
     if traj_period:
-        _remove_period(feats, use, int(n_rep), int(npro), int(traj_period))
+        half = traj_half_window(traj_window, int(traj_period), tr_s)
+        _remove_period(feats, use, int(n_rep), int(npro), int(traj_period), half)
     (rband, cband), (rwin, cwin) = bands(options), windows(options)
     pca = bool(options.physio_pca)
     resp, rinfo = _band_trace(feats, use, fs, rband, pca)
@@ -421,6 +479,7 @@ def analyse(feats: np.ndarray, use: np.ndarray, tr_s: float, options, *, n_rep: 
             "repetitions": int(n_rep), "spokes_per_repetition": int(npro),
             "spokes_unusable": int((~use).sum()), "correct_ramptime": correct_ramptime,
             "trajectory_period_spokes": int(traj_period) if traj_period else None,
+            "trajectory_window_s": (None if not traj_period or traj_window == "off" else float(traj_window)),
             "respiratory_trace": rinfo, "cardiac_trace": cinfo,
         },
         "RespiratoryRate": _summary(rrate, rq),
