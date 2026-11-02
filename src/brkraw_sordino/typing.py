@@ -68,7 +68,7 @@ class Options:
     physio_pca: bool = True
     physio_prefix: Optional[str] = None
     physio_traj_period: str = "auto"      # "auto", "off" or spokes of the trajectory period to remove
-    physio_traj_window: str = "1"         # "off" (mean over the repetition) or seconds of the local cycle mean
+    physio_traj_window: Union[str, float] = 1.0       # "off" (mean over the repetition) or seconds of the local cycle mean
     # Complex frames and pure-noise frames as side files (frameexport.py): "off" or "complex"; the prefix
     # of the files (default as physio_prefix). Never in the recon cache key (frameexport.EXPORT_KEYS).
     frame_export: str = "off"

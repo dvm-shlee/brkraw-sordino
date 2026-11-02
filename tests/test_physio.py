@@ -456,8 +456,8 @@ def test_stationary_pattern_is_removed_by_the_local_mean_as_before(tmp_path):
 
 
 def test_traj_window_option_and_cache_key(tmp_path):
-    assert physio.parse_traj_window(None) == "1" and physio.parse_traj_window(" OFF ") == "off"
-    assert physio.parse_traj_window(0) == "off" and physio.parse_traj_window(0.5) == "0.5"
+    assert physio.parse_traj_window(None) == 1.0 and physio.parse_traj_window(" OFF ") == "off"
+    assert physio.parse_traj_window(0) == "off" and physio.parse_traj_window(0.5) == 0.5
     for bad in ("x", -1, "nan"):
         with pytest.raises(ValueError, match="physio_traj_window"):
             physio.parse_traj_window(bad)

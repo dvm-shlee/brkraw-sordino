@@ -40,7 +40,7 @@ PHYSIO_KEYS = ("physio", "physio_n_inner", "physio_resp_band", "physio_cardiac_b
 DEFAULT_N_INNER = 6
 DEFAULT_RESP_BAND = "0.5,5"
 DEFAULT_CARDIAC_BAND = "5,15"
-DEFAULT_TRAJ_WINDOW = "1"       # s: five cycles of the 5 Hz golden-scan period
+DEFAULT_TRAJ_WINDOW = 1.0       # s: five cycles of the 5 Hz golden-scan period
 DEFAULT_WINDOW_S = "3,1"        # respiration, cardiac (a few periods of each)
 MIN_USABLE = 0.5                # a window with a smaller usable-spoke fraction has quality 0
 COLUMNS = ["time_s", "respiratory", "cardiac", "quality"]
@@ -79,7 +79,7 @@ def parse_traj_period(value: Any) -> str:
     return str(n)
 
 
-def parse_traj_window(value: Any) -> str:
+def parse_traj_window(value: Any):
     """``off`` (the per-repetition cycle mean) or the window in seconds (a positive number) of the local mean."""
     if value is None:
         return DEFAULT_TRAJ_WINDOW
@@ -94,7 +94,7 @@ def parse_traj_window(value: Any) -> str:
         w = -1.0
     if not np.isfinite(w) or w < 0:
         raise ValueError(f"sordino: physio_traj_window must be off or a window in seconds > 0, not {value!r}")
-    return "off" if w == 0 else f"{w:g}"
+    return "off" if w == 0 else w
 
 
 def trajectory_period(options, traj_unit: Optional[int], npro: int) -> Optional[int]:
@@ -352,7 +352,7 @@ def _remove_period(x: np.ndarray, use: np.ndarray, n_rep: int, npro: int, period
         x[r * npro:(r + 1) * npro] = blk[:npro].astype(np.float32)
 
 
-def traj_half_window(window: str, period: int, tr_s: float) -> int:
+def traj_half_window(window, period: int, tr_s: float) -> int:
     """Cycles on each side of the local mean for ``physio_traj_window`` (0 keeps the per-repetition mean)."""
     if window == "off":
         return 0
@@ -442,7 +442,7 @@ def _summary(rate: np.ndarray, qual: np.ndarray) -> Dict[str, Any]:
 
 def analyse(feats: np.ndarray, use: np.ndarray, tr_s: float, options, *, n_rep: int, npro: int,
             ignore_samples: int, n_rx: int, correct_ramptime=None,
-            traj_period: Optional[int] = None, traj_window: str = "off") -> PhysioResult:
+            traj_period: Optional[int] = None, traj_window="off") -> PhysioResult:
     """Traces, rates and quality from the (N, F) features (see ``Collector.finish``).
 
     ``traj_period`` (spokes) removes the trajectory periodicity from the features before the band-pass,
@@ -479,8 +479,8 @@ def analyse(feats: np.ndarray, use: np.ndarray, tr_s: float, options, *, n_rep: 
             "repetitions": int(n_rep), "spokes_per_repetition": int(npro),
             "spokes_unusable": int((~use).sum()), "correct_ramptime": correct_ramptime,
             "trajectory_period_spokes": int(traj_period) if traj_period else None,
-            "trajectory_window_s": (None if not traj_period or traj_window == "off" else float(traj_window)),
             "respiratory_trace": rinfo, "cardiac_trace": cinfo,
+            **({"trajectory_window_s": float(traj_window)} if traj_period and traj_window != "off" else {}),
         },
         "RespiratoryRate": _summary(rrate, rq),
         "CardiacRate": _summary(crate, cq),
