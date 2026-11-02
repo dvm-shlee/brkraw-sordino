@@ -352,9 +352,16 @@ def _remove_period(x: np.ndarray, use: np.ndarray, n_rep: int, npro: int, period
         num = cs[hi] - cs[lo]
         den = cc[hi] - cc[lo]
         mean = num / np.maximum(den, 1.0)[:, :, None]
-        overall = num.sum(axis=1) / np.maximum(den.sum(axis=1), 1.0)[:, None]
-        mean -= overall[:, None, :]                       # keep what is constant across cycle positions
-        blk -=mean.reshape(pad, n_f) * w[:, None]
+        # what is constant across the cycle positions: the mean over all positions of the same cycles, one
+        # value per cycle, interpolated linearly between the cycle centres (a step per cycle would be a
+        # staircase with a line at the cycle rate)
+        per_cycle = num.sum(axis=1) / np.maximum(den.sum(axis=1), 1.0)[:, None]
+        at = np.clip((np.arange(pad) + 0.5) / period - 0.5, 0, ncyc - 1)
+        i0 = np.minimum(at.astype(np.int64), max(ncyc - 2, 0))
+        i1 = np.minimum(i0 + 1, ncyc - 1)
+        frac = (at - i0)[:, None]
+        overall = per_cycle[i0] * (1 - frac) + per_cycle[i1] * frac
+        blk -= (mean.reshape(pad, n_f) - overall) * w[:, None]
         x[r * npro:(r + 1) * npro] = blk[:npro].astype(np.float32)
 
 
