@@ -68,6 +68,10 @@ class Options:
     physio_pca: bool = True
     physio_prefix: Optional[str] = None
     physio_traj_period: str = "auto"      # "auto", "off" or spokes of the trajectory period to remove
+    # Complex frames and pure-noise frames as side files (frameexport.py): "off" or "complex"; the prefix
+    # of the files (default as physio_prefix). Never in the recon cache key (frameexport.EXPORT_KEYS).
+    frame_export: str = "off"
+    frame_export_prefix: Optional[str] = None
 
 
 __all__ = [

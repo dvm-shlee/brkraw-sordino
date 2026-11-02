@@ -183,7 +183,7 @@ def test_docs_golden_options_are_real_options(tmp_path):
     text = NOTE_MD.read_text()
     part = _frames_part(text)
     names = set(re.findall(r"^\| `(frame_[a-z_]+)` \|", part, re.M))
-    assert names == {"frame_spokes", "frame_step", "frame_accumulate"}
+    assert names == {"frame_spokes", "frame_step", "frame_accumulate", "frame_export", "frame_export_prefix"}
     # the YAML block at the top shows the frame options as comments; uncommented they must build
     block = re.search(r"```yaml\n(.*?)```", text, re.S).group(1)
     uncommented = re.sub(r"^(\s*)# (frame_[a-z_]+:)", r"\1\2", block, flags=re.M)

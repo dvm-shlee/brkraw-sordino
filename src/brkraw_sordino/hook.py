@@ -21,7 +21,7 @@ from numpy.typing import NDArray
 from .typing import Options
 from .boolopt import parse_bool
 from . import frames as frames_mod
-from . import dcf, golden, kcentre, lowres, perievent, physio
+from . import dcf, frameexport, golden, kcentre, lowres, perievent, physio
 from .traj import get_trajectory, trajectory_rows  # noqa: F401  (get_trajectory: tests patch it)
 from .recon import (
     GRID_RULE,
@@ -208,6 +208,8 @@ def _build_options(kwargs: Dict[str, Any]) -> Options:
         physio_pca=parse_bool("physio_pca", kwargs.get("physio_pca", True)),
         physio_prefix=(str(kwargs["physio_prefix"]) if kwargs.get("physio_prefix") else None),
         physio_traj_period=physio.parse_traj_period(kwargs.get("physio_traj_period")),
+        frame_export=frameexport.parse_export(kwargs.get("frame_export")),
+        frame_export_prefix=(str(kwargs["frame_export_prefix"]) if kwargs.get("frame_export_prefix") else None),
     )
 
 
@@ -853,6 +855,9 @@ def _plan(scan: Any, reco_id: Optional[int], kwargs: Dict[str, Any]) -> Dict[str
     short_fid = _check_fid_size(scan, recon_info, fid_entry, fid_nbytes, options,
                                 parse_bool("allow_short_fid", kwargs.get("allow_short_fid", True)))
     frame_plan = frames_mod.make_plan(recon_info, options)
+    if frameexport.is_on(options) or options.frame_export_prefix:
+        n_rx = int(parse_fid_info(recon_info)[0][2]) if frameexport.is_on(options) else 1
+        frameexport.check(options, frame_plan, n_rx)
     cache_params = _build_cache_params(scan, reco_id, fid_entry, options, recon_info, frame_plan)
     img_cache_path = build_recon_cache_path(options.cache_dir, cache_params)
     img_meta = _load_cache_meta(_cache_meta_path(img_cache_path))
@@ -942,6 +947,83 @@ def _physio_prefix(scan: Any, plan: Dict[str, Any], options: Options) -> str:
     return str(Path(options.cache_dir) / name)
 
 
+def _frame_export_prefix(scan: Any, plan: Dict[str, Any], options: Options) -> str:
+    """Where the frame-export files go: ``frame_export_prefix``, else ``<cache_dir>/scan<id>`` (``_reco<id>``)."""
+    if options.frame_export_prefix:
+        return os.path.expanduser(options.frame_export_prefix)
+    reco = plan["cache_params"].get("reco_id")
+    name = f"scan{getattr(scan, 'scan_id', 'x')}" + ("" if reco is None else f"_reco{reco}")
+    return str(Path(options.cache_dir) / name)
+
+
+def _noise_cache_state(noise_path: Path, shape: Optional[list], dtype: Optional[np.dtype]) -> Optional[Dict[str, Any]]:
+    """The noise frames' cache metadata when the file and its k-space statistics are valid, else None."""
+    meta = _load_cache_meta(_cache_meta_path(noise_path))
+    if not meta or shape is None or dtype is None or "ksigma" not in meta:
+        return None
+    if list(meta.get("shape") or []) != list(shape) or np.dtype(meta.get("dtype")) != np.dtype(dtype):
+        return None
+    if not _is_cache_valid(noise_path, expected_size=int(np.prod(shape) * np.dtype(dtype).itemsize)):
+        return None
+    return meta
+
+
+def _reconstruct_noise_frames(fid_fobj, traj, recon_info, options, frame_plan, noise_path: Path, cache_files: list,
+                              *, phase_factor, virtual_traj, chunk_spokes, k0_method, weights, out_scale,
+                              shape, dtype) -> Dict[str, Any]:
+    """The pure-noise frames of ``frame_export='complex'``: the data pass again on the repetition residuals.
+
+    Same trajectory, weights, frame plan, phase factor, off-resonance and output scale as the data frames
+    (``frames.recon_frames(noise_out=...)``); the cache file ``noise_path`` has the layout of the data cache.
+    Returns the cache metadata, with the k-space statistics under ``ksigma``.
+    """
+    tmp = noise_path.with_suffix(noise_path.suffix + ".partial")
+    if tmp.exists():
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    # frame_static='cg' keeps its model solve: the noise frames need the data frames' gain 1 / c
+    noise_options = options if options.frame_static == "cg" else replace(options, rep_pattern="none")
+    stats: Dict[str, Any] = {}
+    logger.info("frame_export: reconstructing the pure-noise frames (%s repetitions).", frame_plan.n_rep)
+    with open(tmp, "w+b") as handle:
+        cache_files.append(str(tmp))
+        frames_mod.recon_frames(
+            fid_fobj, traj, recon_info, handle, noise_options, frame_plan, phase_factor=phase_factor,
+            virtual_traj=virtual_traj, chunk_spokes=chunk_spokes, k0_method=k0_method, weights=weights,
+            out_scale=out_scale, noise_out=stats)
+    os.replace(tmp, noise_path)
+    meta = {"dtype": np.dtype(dtype).str, "shape": [int(v) for v in shape], "ksigma": stats}
+    _write_cache_meta(_cache_meta_path(noise_path), meta)
+    return meta
+
+
+def _write_frame_export(scan: Any, export: Dict[str, Any], nii: Any) -> None:
+    """Write the files of ``frame_export='complex'`` beside the magnitude result ``nii`` (same affine and header)."""
+    info = export["recon_info"]
+    prefix, plan, frame_list = export["prefix"], export["plan"], export["frame_list"]
+    Path(prefix).parent.mkdir(parents=True, exist_ok=True)
+
+    def orient(vol):
+        return correct_orientation(vol, info)
+
+    written = []
+    for tag, (path, dtype, shape) in (("frames", export["data"]),
+                                       ("noise_frames", (export["noise"],) + tuple(export["data"][1:]))):
+        re, im = frameexport.read_parts(path, dtype, shape, frame_list, orient)
+        for part, arr in (("real", re), ("imag", im)):
+            out = f"{prefix}_{tag}_{part}.nii.gz"
+            frameexport.nifti_like(arr, nii).to_filename(out)
+            written.append(out)
+        del re, im
+    tsv = f"{prefix}_frames.tsv"
+    frameexport.write_tsv(tsv, plan, frame_list)
+    sigma = f"{prefix}_ksigma.json"
+    frameexport.write_json(sigma, frameexport.ksigma_document(export["ksigma"]))
+    logger.info("frame_export: wrote %s", ", ".join(written + [tsv, sigma]))
+
+
 def get_dataobj(
         scan: Any, reco_id: Optional[int] = None, **kwargs: Any,
     ) -> Optional[Union[np.ndarray, Tuple[np.ndarray, ...]]]:
@@ -1017,7 +1099,18 @@ def get_dataobj(
             and cached_shape is not None):
         # the traces come from the spoke-timing corrected FID of a reconstruction pass, not from the cache
         cached_dtype, cached_shape = None, None
-    if cached_dtype is None or cached_shape is None:
+    export_on = frameexport.is_on(options)
+    noise_path = frameexport.noise_cache_path(img_cache_path)
+    noise_meta = None
+    if export_on:
+        noise_meta = _noise_cache_state(noise_path, cached_shape, cached_dtype)
+        if noise_meta is None and cached_dtype is not None and physio.is_on(options):
+            logger.info("frame_export with physio: reconstructing the images again with the noise frames.")
+            cached_dtype, cached_shape = None, None
+    only_noise = (export_on and noise_meta is None and cached_dtype is not None and cached_shape is not None)
+    if only_noise:
+        logger.info("frame_export: the images are cached; reconstructing the noise frames only.")
+    if cached_dtype is None or cached_shape is None or only_noise:
         with fid_entry.open() as fid_fobj:
             # per-chunk trajectory and phase rows (WI-0097): no whole trajectory, no
             # trajectory cache file, no whole phase factor
@@ -1062,115 +1155,124 @@ def get_dataobj(
                                                 vol0, estimate_k0=virtual_traj is not None)["chunk_spokes"]
                 weights = dcf.pipe_weights(traj, int(recon_info["NPro"]), options.ignore_samples or 1, vol0, cs,
                                            virtual_traj=virtual_traj, cap=options.golden_weights == "capped")
-            img_temp_path = img_cache_path.with_suffix(img_cache_path.suffix + ".partial")
-            if img_temp_path.exists():
-                try:
-                    os.remove(img_temp_path)
-                except OSError:
-                    pass
-            with open(img_temp_path, "w+b") as img_fobj:
-                logger.debug("Created temp image file: %s", img_temp_path)
-                cache_files.append(str(img_temp_path))
+            if not only_noise:
+                img_temp_path = img_cache_path.with_suffix(img_cache_path.suffix + ".partial")
+                if img_temp_path.exists():
+                    try:
+                        os.remove(img_temp_path)
+                    except OSError:
+                        pass
+                with open(img_temp_path, "w+b") as img_fobj:
+                    logger.debug("Created temp image file: %s", img_temp_path)
+                    cache_files.append(str(img_temp_path))
 
-                if options.correct_spoketiming and recon_info['NRepetitions'] > 1:
-                    logger.debug("Spoketiming correction enabled.")
-                    fid_shape, fid_dtype = parse_fid_info(recon_info)
-                    num_frames = get_num_frames(recon_info, options)
-                    stc_expected_size = int(np.prod(fid_shape) * fid_dtype.itemsize * num_frames)
-                    stc_cache_path = build_spoketiming_cache_path(options.cache_dir, cache_params)
-                    stc_meta_path = _cache_meta_path(stc_cache_path)
-                    stc_temp_path = stc_cache_path.with_suffix(stc_cache_path.suffix + ".partial")
-                    stc_param = {
-                        "buffer_size": int(np.prod(fid_shape) * fid_dtype.itemsize),
-                        "dtype": fid_dtype,
-                    }
+                    if options.correct_spoketiming and recon_info['NRepetitions'] > 1:
+                        logger.debug("Spoketiming correction enabled.")
+                        fid_shape, fid_dtype = parse_fid_info(recon_info)
+                        num_frames = get_num_frames(recon_info, options)
+                        stc_expected_size = int(np.prod(fid_shape) * fid_dtype.itemsize * num_frames)
+                        stc_cache_path = build_spoketiming_cache_path(options.cache_dir, cache_params)
+                        stc_meta_path = _cache_meta_path(stc_cache_path)
+                        stc_temp_path = stc_cache_path.with_suffix(stc_cache_path.suffix + ".partial")
+                        stc_param = {
+                            "buffer_size": int(np.prod(fid_shape) * fid_dtype.itemsize),
+                            "dtype": fid_dtype,
+                        }
 
-                    if _is_cache_valid(stc_cache_path, expected_size=stc_expected_size):
-                        logger.debug("Using cached spoketiming file: %s", stc_cache_path)
-                    else:
-                        if stc_temp_path.exists():
-                            try:
-                                os.remove(stc_temp_path)
-                            except OSError:
-                                pass
-                        with open(stc_temp_path, "w+b") as stc_fobj:
-                            cache_files.append(str(stc_temp_path))
-                            logger.debug("Created temp spoketiming file: %s", stc_temp_path)
-                            segs = prep_fid_segmentation(fid_fobj, recon_info, options)
-                            logger.info("Spoketiming correction: %s segment(s).", segs.shape[0])
-                            stc_param = correct_spoketiming(
-                                segs, fid_fobj, stc_fobj, recon_info, options
+                        if _is_cache_valid(stc_cache_path, expected_size=stc_expected_size):
+                            logger.debug("Using cached spoketiming file: %s", stc_cache_path)
+                        else:
+                            if stc_temp_path.exists():
+                                try:
+                                    os.remove(stc_temp_path)
+                                except OSError:
+                                    pass
+                            with open(stc_temp_path, "w+b") as stc_fobj:
+                                cache_files.append(str(stc_temp_path))
+                                logger.debug("Created temp spoketiming file: %s", stc_temp_path)
+                                segs = prep_fid_segmentation(fid_fobj, recon_info, options)
+                                logger.info("Spoketiming correction: %s segment(s).", segs.shape[0])
+                                stc_param = correct_spoketiming(
+                                    segs, fid_fobj, stc_fobj, recon_info, options
+                                )
+                            os.replace(stc_temp_path, stc_cache_path)
+                            _write_cache_meta(
+                                stc_meta_path,
+                                {
+                                    "dtype": np.dtype(stc_param["dtype"]).str,
+                                    "buffer_size": int(stc_param["buffer_size"]),
+                                    "size": stc_expected_size,
+                                },
                             )
-                        os.replace(stc_temp_path, stc_cache_path)
-                        _write_cache_meta(
-                            stc_meta_path,
-                            {
-                                "dtype": np.dtype(stc_param["dtype"]).str,
-                                "buffer_size": int(stc_param["buffer_size"]),
-                                "size": stc_expected_size,
-                            },
-                        )
 
-                    with open(stc_cache_path, "rb") as stc_fobj:
-                        dtype = recon_dataobj(
-                            stc_fobj,
-                            traj,
-                            recon_info,
-                            img_fobj,
-                            options,
-                            override_buffer_size=stc_param['buffer_size'],
-                            override_dtype=stc_param['dtype'],
-                            phase_factor=phase_factor,
-                            virtual_traj=virtual_traj,
-                            k0_out=k0_frames,
-                            chunk_spokes=chunk_spokes,
-                            k0_method=info.get("recon_k0_method"),
-                            weights=weights,
-                            out_scale=out_scale,
-                            physio=collector,
-                        )
-                elif frame_plan is not None:
-                    dtype = frames_mod.recon_frames(
-                        fid_fobj, traj, recon_info, img_fobj, options, frame_plan,
-                        phase_factor=phase_factor, virtual_traj=virtual_traj, k0_out=k0_frames,
-                        chunk_spokes=chunk_spokes, k0_method=info.get("recon_k0_method"),
-                        weights=weights, out_scale=out_scale,
-                        subtract_rep_mean=options.subtract_rep_mean, anat_out=anat_out, physio=collector)
-                    if anat_out and recon_meta["frame_static"]:
-                        recon_meta["frame_static"] = dict(
-                            recon_meta["frame_static"], iterations_run=anat_out["iterations_run"],
-                            relative_residual=anat_out["relative_residual"])
-                    elif anat_out:
-                        recon_meta["anat"] = dict(recon_meta["anat"], **anat_out)
-                else:
-                    logger.debug("Spoketiming correction disabled.")
-                    dtype = recon_dataobj(fid_fobj, traj, recon_info, img_fobj, options,
-                                          phase_factor=phase_factor,
-                                          virtual_traj=virtual_traj, k0_out=k0_frames,
-                                          chunk_spokes=chunk_spokes,
-                                          k0_method=info.get("recon_k0_method"),
-                                          weights=weights, out_scale=out_scale, physio=collector)
-            os.replace(img_temp_path, img_cache_path)
-        if collector is not None:
-            setattr(scan, "_sordino_physio", collector.finish())
-        if options.estimate_k0:
-            recon_meta["k0"] = [[[float(k.real), float(k.imag)] for k in frame] for frame in k0_frames]
-        dataobj_shape = _result_shape(recon_info, options, frame_plan)
-        cached_dtype = np.dtype(dtype)
-        cached_shape = list(dataobj_shape)
-        _write_cache_meta(
-            img_meta_path,
-            {
-                "dtype": cached_dtype.str,
-                "shape": list(cached_shape),
-                "kspace_gap": recon_meta["kspace_gap"],
-                "k0": recon_meta["k0"],
-                "short_fid": recon_meta["short_fid"],
-                **({"recon_matrix": recon_meta["recon_matrix"]} if recon_meta.get("recon_matrix") else {}),
-                **({"anat": recon_meta["anat"]} if recon_meta.get("anat") else {}),
-                **({"frame_static": recon_meta["frame_static"]} if recon_meta.get("frame_static") else {}),
-            },
-        )
+                        with open(stc_cache_path, "rb") as stc_fobj:
+                            dtype = recon_dataobj(
+                                stc_fobj,
+                                traj,
+                                recon_info,
+                                img_fobj,
+                                options,
+                                override_buffer_size=stc_param['buffer_size'],
+                                override_dtype=stc_param['dtype'],
+                                phase_factor=phase_factor,
+                                virtual_traj=virtual_traj,
+                                k0_out=k0_frames,
+                                chunk_spokes=chunk_spokes,
+                                k0_method=info.get("recon_k0_method"),
+                                weights=weights,
+                                out_scale=out_scale,
+                                physio=collector,
+                            )
+                    elif frame_plan is not None:
+                        dtype = frames_mod.recon_frames(
+                            fid_fobj, traj, recon_info, img_fobj, options, frame_plan,
+                            phase_factor=phase_factor, virtual_traj=virtual_traj, k0_out=k0_frames,
+                            chunk_spokes=chunk_spokes, k0_method=info.get("recon_k0_method"),
+                            weights=weights, out_scale=out_scale,
+                            subtract_rep_mean=options.subtract_rep_mean, anat_out=anat_out, physio=collector)
+                        if anat_out and recon_meta["frame_static"]:
+                            recon_meta["frame_static"] = dict(
+                                recon_meta["frame_static"], iterations_run=anat_out["iterations_run"],
+                                relative_residual=anat_out["relative_residual"])
+                        elif anat_out:
+                            recon_meta["anat"] = dict(recon_meta["anat"], **anat_out)
+                    else:
+                        logger.debug("Spoketiming correction disabled.")
+                        dtype = recon_dataobj(fid_fobj, traj, recon_info, img_fobj, options,
+                                              phase_factor=phase_factor,
+                                              virtual_traj=virtual_traj, k0_out=k0_frames,
+                                              chunk_spokes=chunk_spokes,
+                                              k0_method=info.get("recon_k0_method"),
+                                              weights=weights, out_scale=out_scale, physio=collector)
+                os.replace(img_temp_path, img_cache_path)
+            if export_on:
+                noise_meta = _reconstruct_noise_frames(
+                    fid_fobj, traj, recon_info, options, frame_plan, noise_path, cache_files,
+                    phase_factor=phase_factor, virtual_traj=virtual_traj, chunk_spokes=chunk_spokes,
+                    k0_method=info.get("recon_k0_method"), weights=weights, out_scale=out_scale,
+                    shape=cached_shape if only_noise else _result_shape(recon_info, options, frame_plan),
+                    dtype=cached_dtype if only_noise else np.dtype(dtype))
+        if not only_noise:
+            if collector is not None:
+                setattr(scan, "_sordino_physio", collector.finish())
+            if options.estimate_k0:
+                recon_meta["k0"] = [[[float(k.real), float(k.imag)] for k in frame] for frame in k0_frames]
+            dataobj_shape = _result_shape(recon_info, options, frame_plan)
+            cached_dtype = np.dtype(dtype)
+            cached_shape = list(dataobj_shape)
+            _write_cache_meta(
+                img_meta_path,
+                {
+                    "dtype": cached_dtype.str,
+                    "shape": list(cached_shape),
+                    "kspace_gap": recon_meta["kspace_gap"],
+                    "k0": recon_meta["k0"],
+                    "short_fid": recon_meta["short_fid"],
+                    **({"recon_matrix": recon_meta["recon_matrix"]} if recon_meta.get("recon_matrix") else {}),
+                    **({"anat": recon_meta["anat"]} if recon_meta.get("anat") else {}),
+                    **({"frame_static": recon_meta["frame_static"]} if recon_meta.get("frame_static") else {}),
+                },
+            )
     else:
         logger.debug("Using cached recon file: %s", img_cache_path)
         if physio.is_on(options):
@@ -1190,6 +1292,13 @@ def get_dataobj(
     if cached_shape is None:
         cached_shape = _result_shape(recon_info, options, frame_plan)
     assert cached_dtype is not None
+    setattr(scan, "_sordino_frame_export", None)
+    if export_on:
+        assert noise_meta is not None
+        setattr(scan, "_sordino_frame_export", {
+            "prefix": _frame_export_prefix(scan, plan, options), "data": (img_cache_path, cached_dtype, cached_shape),
+            "noise": noise_path, "frame_list": plan["frame_list"], "plan": frame_plan, "recon_info": recon_info,
+            "ksigma": noise_meta["ksigma"]})
     # Frame by frame into one result (WI-0071): magnitude unless as_complex, and the
     # channels combined (RSS of magnitudes, or the complex sum) unless split_ch.
     is_multi = len(cached_shape) == 5
@@ -1414,6 +1523,9 @@ def convert(
             scan, {"cache_params": {}}, options)
         tsv, sidecar = physio.write(result, prefix)
         logger.info("physio: wrote %s and %s", tsv, sidecar)
+    export = getattr(scan, "_sordino_frame_export", None)
+    if export is not None and frameexport.is_on(options) and nii_list:
+        _write_frame_export(scan, export, nii_list[0])
     if options.clear_cache:
         _clear_cache_files(scan)
     if isinstance(dataobj, tuple) or isinstance(affine, tuple):
