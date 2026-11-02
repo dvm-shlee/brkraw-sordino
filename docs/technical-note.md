@@ -439,7 +439,8 @@ spokes at 0.625 ms is 180 s; a single 3D image keeps the brkraw value. Without a
 as brkraw wrote it.
 
 **Subsections.** 10.1 peri-event frames; 10.2 repetition-pattern removal; 10.3 anatomical reference from all
-spokes; 10.4 CG static image in the frames; 10.5 physiological traces from the spokes (not an image).
+spokes; 10.4 CG static image in the frames; 10.5 physiological traces from the spokes (not an image); 10.6 complex frames and
+pure-noise frames (`frame_export`).
 
 **Size.** The recon cache holds one complex128 volume per frame (and channel):
 $16\,n_{\mathrm{ch}}M_1M_2M_3$ bytes per frame. A sliding window also holds one copy of the running sum per open frame
@@ -721,6 +722,53 @@ rhythm is not locked to the repetition period (what is the same in every repetit
 at least 2 repetitions. Bulk motion is not separated from physiology. A rhythm at a multiple of
 $1/(P\,\mathrm{TR})$ is removed together with the trajectory line.
 
+### 10.6 Complex frames and pure-noise frames (`frame_export=complex`; `frameexport.py`, `frames.py`)
+
+The frames of section 10 are complex images; the result of the hook keeps their magnitude. With
+`frame_export=complex` the same run writes, beside it and with the affine and header of the magnitude result
+(`hook.convert`), the files below. None of the options is in the cache key (`frameexport.EXPORT_KEYS`): the complex
+frames are the recon cache, and with the option off nothing changes (cache entries and images are the same bytes).
+
+**Complex frames.** `<prefix>_frames_real.nii.gz` and `<prefix>_frames_imag.nii.gz` (float32, $x,y,z$, frame) hold
+the real and imaginary parts of the cached frames in the output orientation, for the frames selected by `frames`.
+`<prefix>_frames.tsv` has one row per frame: `frame` (index in the frame plan), `position` (the spoke position,
+inside its repetition, of the frame's first spoke), `repetition` (the repetition of that spoke, counted from the first
+repetition read) and `first_spoke`, `last_spoke` (inclusive, counted in the stream of the repetitions read).
+
+**Pure-noise frames.** For a static object and noise that is independent over samples and repetitions, the samples of
+spoke position $k$ in repetition $r$ are $d_{kr}=A_kx+n_{kr}$. With $R$ repetitions read, the residual
+
+$$n'_{kr}=\Big(d_{kr}-\frac1R\sum_{r'}d_{kr'}\Big)\sqrt{\frac{R}{R-1}}$$
+
+has the noise variance $\sigma^2$ of one sample: the object cancels, the mean removal scales the variance by
+$(R-1)/R$ and the Bessel factor $\sqrt{R/(R-1)}$ (`frameexport.bessel_factor`) puts it back. The residuals of one
+position sum to zero over $r$, so they are correlated across repetitions by $-1/(R-1)$ (the variance of one frame
+is unaffected). `<prefix>_noise_frames_real.nii.gz` and `<prefix>_noise_frames_imag.nii.gz` are the frames of the same
+plan built from $n'_{kr}$ by the same engine (`frames.recon_frames(noise_out=...)`): the same trajectory, density
+weights, frame scales, grid-shift phase, phase factor, off-resonance correction and output scale as the data frames.
+A frame with spokes $S$ and scale $s$ then has, per voxel, the variance
+
+$$\mathrm{E}\,\lvert y_n\rvert^{2}=\Big(\frac{s}{n_f}\Big)^{2}\sigma^{2}\sum_{j\in S}w_j^{2},$$
+
+the same in every voxel because every factor of the adjoint other than $w_j$ has unit modulus (the type 1 NUFFT is
+exact to its tolerance). The noise frames have no predicted centre samples (a residual has none) and are written to a
+cache file of their own next to the recon cache, `recon_<hash>_noise.bin`.
+
+**K-space noise level.** `<prefix>_ksigma.json` holds the level measured from the same residuals,
+$s^2_{kj}=\sum_r\lvert d_{kjr}-\bar d_{kj}\rvert^{2}/(R-1)$ for sample $j$ of position $k$, an unbiased estimate of
+$\sigma^2=\mathrm{E}\lvert n\rvert^{2}$ (the real and imaginary parts have $\sigma^2/2$ each). It is pooled over the
+samples in 8 equal bands of $\lvert k\rvert$ (`sigma_per_band`, with `band_edges` in trajectory units, 0.5 = Nyquist),
+over the samples of each position (`sigma_per_position`), and over the outer half of the bands per position, of which
+`sigma_0` is the median over positions (`sigma_outer_pooled` is the same variance pooled over all positions). The file
+also gives `n_repetitions` and the `bessel_factor`. Drift of the object, the phase or the off-resonance between
+repetitions enters as excess variance.
+
+**Cost and limits.** The noise frames need one more pass over the FID (the repetition mean, then the residual frames,
+then the k-space level) and a second cache file as large as the frame cache. At least 2 repetitions, a single receive
+channel and a frame plan (`frame_spokes` or another frame option) are required; the option is refused with `peri_event`,
+`subtract_rep_mean` and `anat_solver: cg`. With `rep_pattern` the data frames carry the pattern term and the noise
+frames are the residual frames alone, since the pattern is not noise.
+
 ## 11. Output scaling (`hook.convert`)
 
 Converted NIfTI files are stored as unsigned 16-bit integers with a linear scaling in the header. For each
@@ -871,6 +919,8 @@ directions come from the method parameter `TrajectoryMode` (`Default`, `GoldenSa
 | `physio_pca` | `true` | Combine the inner samples by principal component (true) or by their mean. |
 | `physio_prefix` | `null` | Path prefix of the side files; default derived from the scan. |
 | `physio_traj_period` | `auto` | Trajectory periodicity removed from the features before the rate estimate: `auto` (twice the method subset of a golden scan, none otherwise), `off`, or a period in spokes. Per repetition, the mean of every position of the cycle is subtracted (a notch comb at multiples of 1/(period x TR); 320 spokes at 0.625 ms notch 5, 10, 15 Hz). |
+| `frame_export` | `off` | `off` or `complex`. `complex` writes, beside the magnitude result, the complex frames as float32 real and imaginary NIfTI files, the frame table, the pure-noise frames made from the repetition residuals by the same reconstruction, and the k-space noise level (section 10.6). Needs a frame plan, at least 2 repetitions and one receive channel; refused with `peri_event`, `subtract_rep_mean` and `anat_solver: cg`. Not in the cache key; the noise frames get a cache file of the size of the frame cache beside it. |
+| `frame_export_prefix` | `null` | Path prefix of the frame-export files; default `<cache_dir>/scan<id>`, with `_reco<id>` when a reco is set. Needs `frame_export: complex`. |
 
 The static image of the `rep_pattern: model` frames has its own options, `frame_static`, `frame_static_iter` and `frame_static_lambda` (section 10.4; table above).
 

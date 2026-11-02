@@ -1,5 +1,17 @@
 # Unreleased (golden-sordino)
 
+- `frame_export` (`off`, `complex`; default `off`) and `frame_export_prefix` (`frameexport.py`): beside the magnitude
+  result, `convert` writes the complex frames as `<prefix>_frames_real.nii.gz` and `<prefix>_frames_imag.nii.gz`
+  (float32, the affine and header of the magnitude result) and `<prefix>_frames.tsv` (frame, position, repetition,
+  first and last spoke). It also writes pure-noise frames, `<prefix>_noise_frames_real.nii.gz` and
+  `<prefix>_noise_frames_imag.nii.gz`, reconstructed by the same engine from the k-space residuals
+  `(d_kr - mean_r d_kr) sqrt(R / (R - 1))` of every spoke position over the R repetitions (same trajectory, weights,
+  scales, frame plan and off-resonance), and `<prefix>_ksigma.json`, the k-space noise level per band of |k| and per
+  position with the number of repetitions and the Bessel factor. The noise frames get their own cache file beside
+  the recon cache and cost one more pass over the FID. The option needs a frame plan, 2 or more repetitions and one
+  receive channel (it stops with a message otherwise). Neither key is in the recon cache key; `frame_export=off`
+  leaves the images and cache entries unchanged. Details: `docs/technical-note.md`, section 10.6.
+
 - fix: NIfTI time step for repetition frames. `pixdim[4]` is now `NPro` x TR (for example 180 s for 288,000
   spokes at 0.625 ms) when each frame is one repetition; it stayed at 1.0 before. Frame modes are unchanged.
 

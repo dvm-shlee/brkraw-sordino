@@ -50,13 +50,14 @@ from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
-from . import frameplan, golden, perievent, physio
+from . import frameexport, frameplan, golden, perievent, physio
 
 logger = logging.getLogger(__name__)
 
 #: Options of this module; they enter the recon cache key through ``FramePlan.key``.
-#: The peri-event and physio keys are owned by their modules and excluded from the raw option key.
-FRAME_KEYS = ("frame_spokes", "frame_step", "frame_accumulate") + perievent.PERI_KEYS + physio.PHYSIO_KEYS
+#: The peri-event, physio and frame-export keys are owned by their modules and excluded from the raw option key.
+FRAME_KEYS = (("frame_spokes", "frame_step", "frame_accumulate") + perievent.PERI_KEYS + physio.PHYSIO_KEYS
+              + frameexport.EXPORT_KEYS)
 
 #: Measured in WI-0112 (scan 11, 3,200-spoke windows): largest gap between spoke
 #: directions from a subset start, from the middle of a subset, across a repetition end.
@@ -571,7 +572,7 @@ def _anat_image(options, kernel, xs, full, preds, virtual_traj, w_virtual, adj, 
 def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, plan: FramePlan, *,
                  phase_factor=None, virtual_traj=None, k0_out=None, chunk_spokes=None, k0_method=None,
                  weights=None, spoke_mask=None, out_scale=1.0, subtract_rep_mean=False, anat_out=None,
-                 physio=None):
+                 physio=None, noise_out=None):
     """Write the frames of ``plan`` to ``img_fobj`` (the layout of ``recon_dataobj``); return their dtype.
 
     ``traj`` (``TrajectoryRows`` or an array), ``phase_factor`` (``PhaseRows`` or an array) and
@@ -610,12 +611,27 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
 
     ``physio`` (a ``physio.Collector``) is fed the raw rows of every stream chunk the engine reads, with
     no read of its own; spokes no frame reads stay unusable in its traces.
+
+    ``noise_out`` (a dict; ``frame_export='complex'``, ``frameexport.py``): write the pure-noise frames
+    instead of the data frames. Every spoke is replaced by the residual n'_kr = (d_kr - mean_r d_kr) *
+    sqrt(R / (R - 1)) of its position over the R repetitions read, and everything else (trajectory,
+    weights, scales, frame plan, phase factor, off-resonance) is that of the data frames. No centre
+    is estimated (the predicted centre samples carry no noise). The dict gets the k-space noise
+    statistics (``frameexport.ksigma``), measured from the same residuals with one more read of the FID.
+    ``options`` must have ``rep_pattern='none'`` and ``frame_static='adjoint'``.
     """
     from . import memguard, serial
     from .recon import (_row_source, correct_offreso, grid_shift, grid_shift_factor, parse_fid_info,
                         parse_volume_shape)
 
     mode = getattr(options, "rep_pattern", "none")
+    noise = noise_out is not None
+    if noise and (mode != "none" or subtract_rep_mean or spoke_mask is not None or physio is not None
+                  or getattr(options, "anat_solver", "adjoint") != "adjoint"):
+        raise ValueError("sordino: the noise frames need rep_pattern='none', no subtract_rep_mean, no spoke "
+                         "mask, no physio collector and anat_solver='adjoint'")
+    if noise and plan.n_rep < 2:
+        raise ValueError(f"sordino: the noise frames need at least 2 repetitions, this run reads {plan.n_rep}")
     if mode != "none" and subtract_rep_mean:
         raise ValueError("sordino: rep_pattern and subtract_rep_mean cannot be used together")
     if mode != "none" and spoke_mask is not None:
@@ -626,7 +642,7 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
     static_cg = getattr(options, "frame_static", "adjoint") == "cg"
     if static_cg and mode != "model":
         raise ValueError("sordino: frame_static='cg' needs rep_pattern='model'")
-    need_x = virtual_traj is not None or mode == "model" or anat   # a CG solve on the all-spoke normal operator
+    need_x = (virtual_traj is not None or mode == "model" or anat) and not noise   # a CG solve on the all-spoke normal operator
     gain = 1.0          # frame_static='cg': residual term to the units of x_hat (1 / c, technical note 10.4)
     img_fobj.seek(0)
     fid_shape, fid_dtype = parse_fid_info(recon_info)
@@ -703,8 +719,9 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
         if virtual_traj is not None:
             w_virtual = weights.virtual().reshape(npro, int(virtual_traj.shape[1]))
     rep_mean = None
-    if subtract_rep_mean or mode == "measured":
-        name = "subtract_rep_mean" if subtract_rep_mean else "rep_pattern='measured'"
+    if subtract_rep_mean or mode == "measured" or noise:
+        name = ("subtract_rep_mean" if subtract_rep_mean
+                else "the noise frames" if noise else "rep_pattern='measured'")
         if plan.n_rep < 2:
             raise ValueError(f"sordino: {name} needs at least 2 repetitions, "
                              f"this run reads {plan.n_rep}")
@@ -723,11 +740,16 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
                 rep_mean[a:b] += k
         rep_mean /= np.maximum(counts, 1).astype(np.float32)[:, None, None]
         stream.rewind()
+        if noise:
+            noise_out.update(frameexport.ksigma(
+                stream.read, rep_mean, rows, plan.n_rep, npro, serial.spoke_ranges(npro, chunk_spokes), ign, n_stop))
+            stream.rewind()
         logger.info("%s: averaged %s repetitions of each of the %s spoke positions "
                     "(%.2f GiB, %s censored spoke(s) left out); every spoke is reconstructed as its "
                     "deviation from that average.", name, plan.n_rep, npro, rep_mean.nbytes / 2**30,
                     0 if censor is None else int((~censor).sum()))
 
+    noise_scale = frameexport.bessel_factor(plan.n_rep) if noise else None
     nf = serial.norm_factor(vol)
     shift = grid_shift(recon_info)       # derived from the affine by the hook (WI-0119)
     adj = serial.Adjoint(vol)
@@ -749,6 +771,8 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
                     physio.feed(r * npro + a, k)       # raw rows of this pass; a spoke read twice counts once
                 if rep_mean is not None and not raw:
                     k = k - rep_mean[a:b]          # residual from this position's own average
+                    if noise_scale is not None:
+                        k = k * noise_scale        # noise frames: variance sigma^2 after the Bessel factor
                 if phase_factor is not None:
                     k = k * phase_factor[a:b][:, None, :]
                 k = k[..., ign:n_stop]
@@ -780,7 +804,7 @@ def recon_frames(fid_fobj, traj, recon_info: Dict[str, Any], img_fobj, options, 
     preds = None
     xs = None
     x_full = None
-    if mode != "none" or virtual_traj is not None or anat:
+    if (mode != "none" or virtual_traj is not None or anat) and not noise:
         from .kcentre import k0_iterations
         n_iter = k0_iterations(recon_info)     # N_ITER unless the centre gap is wide (WI-0137)
 
