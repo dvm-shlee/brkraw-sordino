@@ -752,8 +752,8 @@ $$\mathrm{E}\,\lvert y_n\rvert^{2}=\Big(\frac{s}{n_f}\Big)^{2}\sigma^{2}\sum_{j\
 
 the same in every voxel because every factor of the adjoint other than $w_j$ has unit modulus (the type 1 NUFFT is
 exact to its tolerance). The noise frames have no predicted centre samples (a residual has none) and are written to a
-With `frame_static: cg` the noise frames carry the same gain $1/c$ as the residual term of the data frames (section 10.4): the noise pass repeats the all-spoke solve on the raw data and applies that gain, so the noise and the data stay in the same units.
 cache file of their own next to the recon cache, `recon_<hash>_noise.bin`.
+With `frame_static: cg` the noise frames carry the same gain $1/c$ as the residual term of the data frames (section 10.4): the noise pass repeats the all-spoke solve on the raw data and applies that gain, so the noise and the data stay in the same units.
 
 **K-space noise level.** `<prefix>_ksigma.json` holds the level measured from the same residuals,
 $s^2_{kj}=\sum_r\lvert d_{kjr}-\bar d_{kj}\rvert^{2}/(R-1)$ for sample $j$ of position $k$, an unbiased estimate of
