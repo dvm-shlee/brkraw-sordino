@@ -315,7 +315,9 @@ def _remove_period(x: np.ndarray, use: np.ndarray, n_rep: int, npro: int, period
     rhythm that is not such a multiple averages out over the many cycles of a repetition (288000 / 320 = 900
     for the usual scan). With ``half`` >= 1 it is local: for the cycle c the mean of the same position over
     the cycles c - half .. c + half of the repetition (cut at its ends), so a pattern whose amplitude drifts
-    within a repetition is removed with it. Cumulative sums over the cycles keep the cost at
+    within a repetition is removed with it. Only the cycle-shaped part goes: the local mean over all
+    positions of the same window is subtracted from the position mean, so a component slower than the window
+    (respiration) is constant across the positions and stays. Cumulative sums over the cycles keep the cost at
     O(spokes x features) and the working arrays at the size of one repetition of the features. Unusable
     spokes are left out of every mean and stay 0.
     """
@@ -347,8 +349,19 @@ def _remove_period(x: np.ndarray, use: np.ndarray, n_rep: int, npro: int, period
         np.cumsum(blk.reshape(ncyc, period, n_f), axis=0, out=cs[1:])
         cc = np.zeros((ncyc + 1, period))
         np.cumsum(w.reshape(ncyc, period), axis=0, out=cc[1:])
-        mean = (cs[hi] - cs[lo]) / np.maximum(cc[hi] - cc[lo], 1.0)[:, :, None]
-        blk -= mean.reshape(pad, n_f) * w[:, None]
+        num = cs[hi] - cs[lo]
+        den = cc[hi] - cc[lo]
+        mean = num / np.maximum(den, 1.0)[:, :, None]
+        # what is constant across the cycle positions: the mean over all positions of the same cycles, one
+        # value per cycle, interpolated linearly between the cycle centres (a step per cycle would be a
+        # staircase with a line at the cycle rate)
+        per_cycle = num.sum(axis=1) / np.maximum(den.sum(axis=1), 1.0)[:, None]
+        at = np.clip((np.arange(pad) + 0.5) / period - 0.5, 0, ncyc - 1)
+        i0 = np.minimum(at.astype(np.int64), max(ncyc - 2, 0))
+        i1 = np.minimum(i0 + 1, ncyc - 1)
+        frac = (at - i0)[:, None]
+        overall = per_cycle[i0] * (1 - frac) + per_cycle[i1] * frac
+        blk -= (mean.reshape(pad, n_f) - overall) * w[:, None]
         x[r * npro:(r + 1) * npro] = blk[:npro].astype(np.float32)
 
 

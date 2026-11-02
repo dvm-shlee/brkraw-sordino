@@ -395,16 +395,19 @@ def _line_power(x, f, bw=0.25):
     return spec[(fr > f - bw) & (fr < f + bw)].sum()
 
 
-def _local_case(seed=1):
-    """A 320-spoke pattern whose amplitude carries a slow drift and a 0.7 Hz sinusoid, plus a 7 Hz sinusoid."""
+def _local_case(seed=1, offset=2.0):
+    """A 320-spoke pattern whose amplitude carries a slow drift (a few sinusoids below 0.3 Hz) and a 0.7 Hz
+    sinusoid, plus a 7 Hz and an additive 0.6 Hz sinusoid."""
     rng = np.random.default_rng(seed)
     t = np.arange(LOC_NPRO) * TR_MS * 1e-3
-    pattern = np.tile(rng.standard_normal((LOC_P, LOC_F)) + 2, (LOC_NPRO // LOC_P, 1))
+    pattern = np.tile(rng.standard_normal((LOC_P, LOC_F)) + offset, (LOC_NPRO // LOC_P, 1))
     reps = []
     for r in range(LOC_REP):
-        drift = 1 + 0.3 * np.cumsum(rng.standard_normal(LOC_NPRO)) / 60
+        slow = sum(np.sin(2 * np.pi * f * t + ph) for f, ph in zip((0.11, 0.19, 0.29), rng.uniform(0, 6.3, 3)))
+        drift = 1 + 0.15 * slow
         reps.append(pattern * (drift + 0.2 * np.sin(2 * np.pi * 0.7 * t + r))[:, None])
     card = np.tile(0.05 * np.sin(2 * np.pi * 7 * t), LOC_REP)[:, None] * np.ones(LOC_F)
+    card = card + np.tile(0.3 * np.sin(2 * np.pi * 0.6 * t), LOC_REP)[:, None] * np.ones(LOC_F)
     noise = 0.01 * rng.standard_normal((LOC_REP * LOC_NPRO, LOC_F))
     return np.vstack(reps), card, noise
 
@@ -427,6 +430,7 @@ def test_local_cycle_mean_removes_the_pattern_lines_and_keeps_the_cardiac_rhythm
     alone = card.astype(np.float32)                                        # the operator is linear
     physio._remove_period(alone, use, LOC_REP, LOC_NPRO, LOC_P, half)
     assert _line_power(alone, 7) >= 0.9 * _line_power(card, 7)
+    assert _line_power(alone, 0.6) >= 0.9 * _line_power(card, 0.6)         # slow physiology stays
     assert elapsed < 5.0                                                   # O(spokes x features)
     # the per-repetition mean leaves the drift behind
     y = before.copy()
@@ -435,7 +439,7 @@ def test_local_cycle_mean_removes_the_pattern_lines_and_keeps_the_cardiac_rhythm
 
 
 def test_local_cycle_mean_leaves_unusable_spokes_out_and_at_zero():
-    pattern, card, noise = _local_case(seed=2)
+    pattern, card, noise = _local_case(seed=2, offset=0.0)      # no part constant across the cycle positions
     use = np.ones(LOC_REP * LOC_NPRO, dtype=bool)
     use[500:900] = False
     use[LOC_NPRO + 40::97] = False
@@ -443,7 +447,7 @@ def test_local_cycle_mean_leaves_unusable_spokes_out_and_at_zero():
     x[~use] = 0
     physio._remove_period(x, use, LOC_REP, LOC_NPRO, LOC_P, 2)
     assert np.all(x[~use] == 0) and np.isfinite(x).all()
-    assert abs(x[use]).mean() < 0.2 * abs(pattern).mean()
+    assert abs(x[use] - card[use]).mean() < 0.2 * abs(pattern).mean()      # the pattern goes, the rhythms stay
 
 
 def test_stationary_pattern_is_removed_by_the_local_mean_as_before(tmp_path):
