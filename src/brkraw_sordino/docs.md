@@ -45,7 +45,7 @@ side-file options (not in cache key):
   physio_pca=true            PCA trace per band (false: mean)
   physio_prefix=null         output prefix; writes <prefix>_physio.tsv.gz/.json
   physio_traj_period=auto    trajectory period: auto, off or spokes >= 2
-  physio_traj_window=1       local cycle mean s (>0; off: whole rep)
+  physio_traj_window=1       s >0; off,false,no,0: whole rep; on,true,yes: 1
   frame_export=off           off or complex: complex, pure-noise frames, k sigma
   frame_export_prefix=null   prefix of <prefix>_frames_* (needs complex)
 read-time options (not in the cache key):
