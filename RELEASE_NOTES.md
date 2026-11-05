@@ -1,4 +1,4 @@
-# Unreleased (golden-sordino)
+# Release v0.3.0 (unreleased)
 
 - `frame_export` (`off`, `complex`; default `off`) and `frame_export_prefix` (`frameexport.py`): beside the magnitude
   result, `convert` writes the complex frames as `<prefix>_frames_real.nii.gz` and `<prefix>_frames_imag.nii.gz`
