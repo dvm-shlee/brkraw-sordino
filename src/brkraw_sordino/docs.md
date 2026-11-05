@@ -30,24 +30,24 @@ frame options (golden scans; a Default scan only with a spoke count):
   subtract_rep_mean=false    subtract repetition mean (needs frames, 2+ reps)
   rep_pattern=none           remove the repeated pattern: none, model, measured
   anat_solver=adjoint        frame_spokes=all image: adjoint or cg (all spokes)
-  anat_cg_iter=10            CG iterations of anat_solver=cg
-  anat_lambda=0.0            Tikhonov weight of anat_solver=cg (absolute)
+  anat_cg_iter=10            CG iterations of anat_solver=cg (integer >= 1)
+  anat_lambda=0.0            Tikhonov weight of anat_solver=cg (absolute, >= 0)
   frame_static=adjoint       rep_pattern=model frames: static part adjoint or cg
-  frame_static_iter=10       CG iterations of frame_static=cg
-  frame_static_lambda=0.0    Tikhonov weight of frame_static=cg (absolute)
+  frame_static_iter=10       CG iterations of frame_static=cg (integer >= 1)
+  frame_static_lambda=0.0    Tikhonov weight of frame_static=cg (absolute, >= 0)
 
 side-file options (not in cache key):
   physio=off                 on: respiration/heart rate from the spokes
-  physio_n_inner=6           innermost samples per spoke (after ignore_samples)
-  physio_resp_band=0.5,5     respiratory band, low,high in Hz
-  physio_cardiac_band=5,15   cardiac band, low,high in Hz
-  physio_window_s=3,1        rate window in s: respiration,cardiac
+  physio_n_inner=6           innermost samples per spoke, int >= 1
+  physio_resp_band=0.5,5     respiratory band, low,high in Hz (0 < low < high)
+  physio_cardiac_band=5,15   cardiac band, low,high in Hz (0 < low < high)
+  physio_window_s=3,1        window s (>0): respiration,cardiac
   physio_pca=true            PCA trace per band (false: mean)
   physio_prefix=null         output prefix; writes <prefix>_physio.tsv.gz/.json
-  physio_traj_period=auto    trajectory period removed: auto, off or spokes
-  physio_traj_window=1       local cycle mean in s (off: whole repetition)
-  frame_export=off           complex: complex and pure-noise frames, k sigma
-  frame_export_prefix=null   output prefix of <prefix>_frames_*, _noise_frames_*
+  physio_traj_period=auto    trajectory period: auto, off or spokes >= 2
+  physio_traj_window=1       local cycle mean s (>0; off: whole rep)
+  frame_export=off           off or complex: complex, pure-noise frames, k sigma
+  frame_export_prefix=null   prefix of <prefix>_frames_* (needs complex)
 read-time options (not in the cache key):
   frames=null                frames to return: int, list or "start:stop:step"
   axis=null                  frame axis: 3, -1, cycle or repetition
