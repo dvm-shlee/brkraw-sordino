@@ -22,7 +22,9 @@
   repetitions; `convert` writes `<prefix>_physio.tsv.gz` (`time_s`, `respiratory`, `cardiac`, `quality`, no
   header) and `<prefix>_physio.json`. None of these keys is in the recon cache key; `physio=off` leaves images
   and cache entries unchanged and `physio=on` leaves the images unchanged. Details:
-  `docs/technical-note.md`, section 10.5.
+  `docs/technical-note.md`, section 10.5. The `cardiac` column and `CardiacRate` are **experimental**: on the four
+  reference scans the cardiac peak sits at 6.0-6.6 Hz in 39 of 40 repetitions (about 380 bpm), a near-constant line,
+  so the trace is not shown to be physiological, and no external physiology recording exists for these scans.
 - `physio_traj_period` (`auto`, `off`, or spokes; default `auto`): the cardiac trace of golden scans carried a
   line at 10 Hz (and 5 Hz) from the subset sweep of the spoke order (160 spokes x 0.625 ms = 100 ms). `auto`
   subtracts, per repetition, the mean of every position of a two-subset cycle before the band-pass; `off`

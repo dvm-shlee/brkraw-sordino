@@ -649,6 +649,10 @@ Respiration and heart rate are estimated from the data of the scan itself; no se
 are a side output: images and the recon cache are unchanged, and none of the `physio` options is in the cache
 key (`physio.PHYSIO_KEYS`).
 
+**Cardiac output is experimental.** On the four reference scans the cardiac peak sits at 6.0-6.6 Hz in 39 of 40
+repetitions (about 380 bpm), a near-constant line, so the `cardiac` trace is not shown to be physiological; no
+external physiology recording exists for these scans.
+
 **Source and rate.** The k-space centre of every spoke: the `physio_n_inner` samples nearest to $k=0$ after the
 `ignore_samples` trim, per channel (`Collector.feed`). The phase factor and the off-resonance correction are
 applied as in the reconstruction. Read in stream order they are one complex sample per spoke and channel, so
@@ -724,7 +728,7 @@ the usable windows, and the median, 5th and 95th percentile rate (`_summary`).
 | `physio` | `off` | `off` or `on` (`parse_physio`). |
 | `physio_n_inner` | `6` | Inner samples per spoke, a positive integer (`parse_n_inner`). |
 | `physio_resp_band` | `0.5,5` | Respiration band, Hz, `low,high`, $0<\text{low}<\text{high}$ (`parse_band`). |
-| `physio_cardiac_band` | `5,15` | Cardiac band, Hz (`parse_band`). |
+| `physio_cardiac_band` | `5,15` | Cardiac band (experimental), Hz (`parse_band`). |
 | `physio_window_s` | `3,1` | Window seconds, `respiration,cardiac`; one number serves both (`parse_window`). |
 | `physio_pca` | `true` | Principal component (true) or sign-aligned mean (false) (`_band_trace`). |
 | `physio_prefix` | `null` | Prefix of the output files; default `<cache_dir>/scan<id>`, with `_reco<id>` when a reco is set (`hook._physio_prefix`). |
@@ -733,10 +737,10 @@ the usable windows, and the median, 5th and 95th percentile rate (`_summary`).
 
 **Output (`physio.write`, called by `hook.convert`).** `<prefix>_physio.tsv.gz`: one row per spoke of the
 stream, tab separated, no header, columns `time_s` (spoke index / $f_s$, seconds from the first spoke read),
-`respiratory`, `cardiac` (arbitrary units) and `quality` (0 to 1). `<prefix>_physio.json`: `SamplingFrequency`,
+`respiratory`, `cardiac` (experimental, arbitrary units) and `quality` (0 to 1). `<prefix>_physio.json`: `SamplingFrequency`,
 `StartTime` (0), `Columns`, `Units`, the method record (`Method`: inner samples, channels, features, bands,
 windows, filter, rate and quality definitions, repetitions, unusable spokes, trajectory period, per-trace
-feature count) and the `RespiratoryRate` and `CardiacRate` summaries (`PhysioResult.sidecar`, `analyse`).
+feature count) and the `RespiratoryRate` and `CardiacRate` (experimental) summaries (`PhysioResult.sidecar`, `analyse`).
 
 **Limits.** The traces are not validated against an external sensor (respiration belt, ECG, pulse oximeter) in
 this package. Rates are estimates of the dominant spectral peak in a window, not beat or breath detections;
@@ -938,7 +942,7 @@ directions come from the method parameter `TrajectoryMode` (`Default`, `GoldenSa
 | `physio` | `off` | `off` or `on`. `on` extracts respiration and heart rate from the innermost spoke samples in the same FID pass and writes them to a side file; images and the recon cache are unchanged. |
 | `physio_n_inner` | `6` | Number of innermost samples per spoke used for the trace (a positive integer). |
 | `physio_resp_band` | `0.5,5` | Respiration band in Hz, `low,high`. |
-| `physio_cardiac_band` | `5,15` | Cardiac band in Hz, `low,high`. |
+| `physio_cardiac_band` | `5,15` | Cardiac band (experimental) in Hz, `low,high`. |
 | `physio_window_s` | `3,1` | Estimation windows in seconds, `respiration,cardiac`. |
 | `physio_pca` | `true` | Combine the inner samples by principal component (true) or by their mean. |
 | `physio_prefix` | `null` | Path prefix of the side files; default derived from the scan. |

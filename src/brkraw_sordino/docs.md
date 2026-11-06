@@ -37,7 +37,7 @@ frame options (golden scans; a Default scan only with a spoke count):
   frame_static_lambda=0.0    Tikhonov weight of frame_static=cg (absolute, >= 0)
 
 side-file options (not in cache key):
-  physio=off                 on: respiration/heart rate from the spokes
+  physio=off                 on: respiration/heart rate (cardiac: experimental)
   physio_n_inner=6           innermost samples per spoke, int >= 1
   physio_resp_band=0.5,5     respiratory band, low,high in Hz (0 < low < high)
   physio_cardiac_band=5,15   cardiac band, low,high in Hz (0 < low < high)
